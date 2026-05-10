@@ -2,7 +2,8 @@
  * \file AppVehicle.h
  * \brief 4WD RC Vehicle 제어 모듈
  *
- * 명령: 정지, 전진, 후진, 좌회전, 우회전, 좌스핀, 우스핀
+ * 명령: 정지, 전진, 후진, 좌스핀, 우스핀
+ * 키 미입력 시 자동 정지 (타임아웃)
  *********************************************************************************************************************/
 #ifndef APPVEHICLE_H
 #define APPVEHICLE_H
@@ -14,10 +15,8 @@ typedef enum
     VEHICLE_STOP       = 0,
     VEHICLE_FORWARD    = 1,
     VEHICLE_REVERSE    = 2,
-    VEHICLE_TURN_LEFT  = 3,
-    VEHICLE_TURN_RIGHT = 4,
-    VEHICLE_SPIN_LEFT  = 5,
-    VEHICLE_SPIN_RIGHT = 6
+    VEHICLE_SPIN_LEFT  = 3,
+    VEHICLE_SPIN_RIGHT = 4
 } VehicleCommand;
 
 extern volatile uint8   g_vehicleCmd;      /* VehicleCommand */
