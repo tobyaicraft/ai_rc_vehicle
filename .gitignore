@@ -1,0 +1,11 @@
+# IDE metadata
+.metadata/
+.claude/
+
+# Build outputs
+ai_rc_vehicle/Configurations/Debug/
+ai_rc_vehicle/Configurations/Release/
+
+# OS files
+Thumbs.db
+.DS_Store
