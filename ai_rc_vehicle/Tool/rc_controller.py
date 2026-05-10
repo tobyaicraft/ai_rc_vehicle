@@ -109,13 +109,13 @@ class RcControllerApp:
                  font=("Consolas", 10)).pack(side=tk.LEFT, padx=(2, 12))
 
     def _build_status_panel(self):
-        frm = tk.Frame(self.root, bg=BG)
-        frm.pack(fill=tk.X, padx=16, pady=(10, 4))
+        row1 = tk.Frame(self.root, bg=BG)
+        row1.pack(fill=tk.X, padx=16, pady=(10, 4))
 
-        tk.Label(frm, text="Port:", bg=BG, fg=TEXT_DIM,
+        tk.Label(row1, text="Port:", bg=BG, fg=TEXT_DIM,
                  font=("Consolas", 10)).pack(side=tk.LEFT, padx=(0, 6))
 
-        self._combo = ttk.Combobox(frm, width=30, state="readonly",
+        self._combo = ttk.Combobox(row1, width=30, state="readonly",
                                     font=("Consolas", 9))
         self._combo.pack(side=tk.LEFT, padx=4)
 
@@ -123,15 +123,27 @@ class RcControllerApp:
                          font=("Consolas", 10, "bold"),
                          activebackground="#1e3050", activeforeground=PHOS)
 
-        tk.Button(frm, text="⟳", width=3,
+        tk.Button(row1, text="⟳", width=3,
                   bg="#162035", fg=TEXT_HI, **btn_style,
                   command=self._refresh_ports).pack(side=tk.LEFT, padx=3)
 
+        row2 = tk.Frame(self.root, bg=BG)
+        row2.pack(fill=tk.X, padx=16, pady=(4, 4))
+
+        tk.Label(row2, text="Baud:", bg=BG, fg=TEXT_DIM,
+                 font=("Consolas", 10)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self._baud_combo = ttk.Combobox(row2, width=10, state="readonly",
+                                         font=("Consolas", 9))
+        self._baud_combo["values"] = ["9600", "19200", "38400", "57600", "115200"]
+        self._baud_combo.set("115200")
+        self._baud_combo.pack(side=tk.LEFT, padx=4)
+
         self._btn_conn = tk.Button(
-            frm, text="Connect", width=11,
+            row2, text="Connect", width=11,
             bg="#162035", fg=TEXT_HI, **btn_style,
             command=self._toggle_connect)
-        self._btn_conn.pack(side=tk.LEFT, padx=3)
+        self._btn_conn.pack(side=tk.LEFT, padx=(12, 3))
 
     def _build_dpad(self):
         """방향키 D-pad 시각화"""
@@ -227,11 +239,6 @@ class RcControllerApp:
         self.root.bind('<KeyRelease-Left>',  lambda e: self._key_release('Left'))
         self.root.bind('<KeyRelease-Right>', lambda e: self._key_release('Right'))
 
-        for i in range(1, 10):
-            self.root.bind(str(i), lambda e, n=int(e.char) if hasattr(e, 'char') else i: self._set_speed(n))
-
-        # 숫자키 바인딩 (lambda 캡처 수정)
-        self.root.unbind('1')
         for i in range(1, 10):
             self.root.bind(str(i), lambda e, n=i: self._set_speed(n))
 
@@ -330,12 +337,16 @@ class RcControllerApp:
             messagebox.showwarning("Warning", "COM 포트를 선택하세요.")
             return
         port = sel.split()[0].strip()
+        baud = int(self._baud_combo.get())
         try:
-            self.serial_port = serial.Serial(port, BAUD_RATE, timeout=0.1)
+            self.serial_port = serial.Serial(port, baud, timeout=0.1)
             self.connected = True
             self._btn_conn.configure(text="Disconnect", fg=WARN)
-            self._status_var.set(f"  {port}  @  {BAUD_RATE} bps")
+            self._status_var.set(f"  {port}  @  {baud} bps")
             self._led_cv.itemconfigure(self._led, fill=PHOS)
+            self._combo.configure(state="disabled")
+            self._baud_combo.configure(state="disabled")
+            self.root.focus_set()  # 포커스를 메인 윈도우로 이동
         except Exception as e:
             messagebox.showerror("Connect Error", f"{port} 열기 실패\n\n{e}")
 
@@ -348,6 +359,8 @@ class RcControllerApp:
         self._btn_conn.configure(text="Connect", fg=TEXT_HI)
         self._status_var.set("Disconnected")
         self._led_cv.itemconfigure(self._led, fill=TEXT_DIM)
+        self._combo.configure(state="readonly")
+        self._baud_combo.configure(state="readonly")
         self._update_dpad_visual(None)
         self._lbl_cmd.configure(text="STOP", fg=TEXT_DIM)
 

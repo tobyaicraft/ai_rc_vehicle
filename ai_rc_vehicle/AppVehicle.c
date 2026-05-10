@@ -50,15 +50,15 @@ void AppVehicle_Update(void)
     case VEHICLE_SPIN_LEFT:
         dirFL = MOTOR_REVERSE;  dirFR = MOTOR_FORWARD;
         dirRL = MOTOR_REVERSE;  dirRR = MOTOR_FORWARD;
-        dutyFL = speed;  dutyFR = speed;
-        dutyRL = speed;  dutyRR = speed;
+        dutyFL = 100.0f;  dutyFR = 100.0f;
+        dutyRL = 100.0f;  dutyRR = 100.0f;
         break;
 
     case VEHICLE_SPIN_RIGHT:
         dirFL = MOTOR_FORWARD;  dirFR = MOTOR_REVERSE;
         dirRL = MOTOR_FORWARD;  dirRR = MOTOR_REVERSE;
-        dutyFL = speed;  dutyFR = speed;
-        dutyRL = speed;  dutyRR = speed;
+        dutyFL = 100.0f;  dutyFR = 100.0f;
+        dutyRL = 100.0f;  dutyRR = 100.0f;
         break;
 
     default: /* VEHICLE_STOP */

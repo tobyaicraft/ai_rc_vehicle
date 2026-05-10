@@ -4,7 +4,7 @@
  *
  * TX : P15.2 (IfxAsclin0_TX_P15_2_OUT)  → X102 pin 31
  * RX : P15.3 (IfxAsclin0_RXB_P15_3_IN)  → X102 pin 32
- * BaudRate : 115200, 8-N-1
+ * BaudRate : 9600, 8-N-1 (HC-12 기본값)
  *********************************************************************************************************************/
 #ifndef DRVUART_H
 #define DRVUART_H

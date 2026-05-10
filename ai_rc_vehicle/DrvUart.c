@@ -59,7 +59,7 @@ void DrvUart_Init(void)
     IfxAsclin_Asc_Config cfg;
     IfxAsclin_Asc_initModuleConfig(&cfg, &MODULE_ASCLIN0);
 
-    cfg.baudrate.baudrate    = 115200.0f;
+    cfg.baudrate.baudrate    = 9600.0f;
     cfg.baudrate.prescaler   = 1u;
 
     cfg.frame.dataLength     = IfxAsclin_DataLength_8;
