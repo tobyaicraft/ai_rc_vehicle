@@ -85,9 +85,12 @@ void DrvPwm_Init(void)
     initTomPwm(&s_tomRL, gtm, IfxGtm_Tom_0, IfxGtm_Tom_Ch_6,
                &IfxGtm_TOM0_6_TOUT4_P02_4_OUT);
 
-    /* RR: TOM0_Ch13 -> P02.5 (X103 pin 18) */
-    initTomPwm(&s_tomRR, gtm, IfxGtm_Tom_0, IfxGtm_Tom_Ch_13,
-               &IfxGtm_TOM0_13_TOUT5_P02_5_OUT);
+    /* RR: TOM0_Ch7 -> P02.7 (X103 pin 20) — Ch13(TGC1) 출력 불가로 Ch7(TGC0)로 변경 */
+    initTomPwm(&s_tomRR, gtm, IfxGtm_Tom_0, IfxGtm_Tom_Ch_7,
+               &IfxGtm_TOM0_7_TOUT7_P02_7_OUT);
+
+    /* 모든 TOM 채널 설정 완료 후 FXCLK 활성화 */
+    IfxGtm_Cmu_enableClocks(gtm, IFXGTM_CMU_CLKEN_FXCLK);
 }
 
 void DrvPwm_SetDutyFL(float32 dutyPercent) { setDuty(&s_tomFL, dutyPercent); }

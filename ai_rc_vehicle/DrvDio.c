@@ -74,18 +74,18 @@ void DrvDio_SetMotorFL(MotorDirection dir)
     }
 }
 
-/* Motor FR: IN1=P33.1, IN2=P33.12 */
+/* Motor FR: IN1=P33.1, IN2=P33.12 (실측: 방향 반전 보정) */
 void DrvDio_SetMotorFR(MotorDirection dir)
 {
     switch (dir)
     {
     case MOTOR_FORWARD:
-        IfxPort_setPinHigh(&MODULE_P33, 1);
-        IfxPort_setPinLow(&MODULE_P33, 12);
-        break;
-    case MOTOR_REVERSE:
         IfxPort_setPinLow(&MODULE_P33, 1);
         IfxPort_setPinHigh(&MODULE_P33, 12);
+        break;
+    case MOTOR_REVERSE:
+        IfxPort_setPinHigh(&MODULE_P33, 1);
+        IfxPort_setPinLow(&MODULE_P33, 12);
         break;
     default:
         IfxPort_setPinLow(&MODULE_P33, 1);
@@ -94,18 +94,18 @@ void DrvDio_SetMotorFR(MotorDirection dir)
     }
 }
 
-/* Motor RL: IN1=P00.0, IN2=P00.1 */
+/* Motor RL: IN1=P00.0, IN2=P00.1 (실측: 방향 반전 보정) */
 void DrvDio_SetMotorRL(MotorDirection dir)
 {
     switch (dir)
     {
     case MOTOR_FORWARD:
-        IfxPort_setPinHigh(&MODULE_P00, 0);
-        IfxPort_setPinLow(&MODULE_P00, 1);
-        break;
-    case MOTOR_REVERSE:
         IfxPort_setPinLow(&MODULE_P00, 0);
         IfxPort_setPinHigh(&MODULE_P00, 1);
+        break;
+    case MOTOR_REVERSE:
+        IfxPort_setPinHigh(&MODULE_P00, 0);
+        IfxPort_setPinLow(&MODULE_P00, 1);
         break;
     default:
         IfxPort_setPinLow(&MODULE_P00, 0);
