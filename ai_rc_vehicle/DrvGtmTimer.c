@@ -1,11 +1,13 @@
 /**********************************************************************************************************************
  * \file DrvGtmTimer.c
- * \brief GTM TOM0 Ch1 기반 1ms 스케줄러 tick 드라이버
+ * \brief GTM TOM0 Ch15 기반 1ms 스케줄러 tick 드라이버
  *
  * Clock chain:
  *   GTM GCLK  = 100 MHz (fSOURCE 200MHz, GTM 모듈 기본 분주)
  *   FXCLK1    = GCLK / 16 = 6,250,000 Hz
  *   period    = 6,250 ticks  →  1ms (오차 없음)
+ *
+ * TOM0_Ch15를 사용하여 Ch0~Ch13을 모터 PWM에 양보
  *********************************************************************************************************************/
 #include "DrvGtmTimer.h"
 #include "Gtm/Tom/Pwm/IfxGtm_Tom_Pwm.h"
@@ -27,7 +29,7 @@ static IfxGtm_Tom_Pwm_Driver s_timer;
 /******************************************************************************/
 IFX_INTERRUPT(gtmTimer_ISR, 0, DRVGTMTIMER_ISR_PRIORITY)
 {
-    IfxGtm_Tom_Ch_clearOneNotification(&MODULE_GTM.TOM[IfxGtm_Tom_0], IfxGtm_Tom_Ch_1);
+    IfxGtm_Tom_Ch_clearOneNotification(&MODULE_GTM.TOM[IfxGtm_Tom_0], IfxGtm_Tom_Ch_15);
     g_1ms_counter++;
 }
 
@@ -47,7 +49,7 @@ void DrvGtmTimer_Init(void)
     IfxGtm_Tom_Pwm_initConfig(&cfg, gtm);
 
     cfg.tom                      = IfxGtm_Tom_0;
-    cfg.tomChannel               = IfxGtm_Tom_Ch_1;
+    cfg.tomChannel               = IfxGtm_Tom_Ch_15;
     cfg.clock                    = IfxGtm_Tom_Ch_ClkSrc_cmuFxclk1;   /* GCLK / 16 */
     cfg.period                   = TIMER_PERIOD_TICKS;
     cfg.dutyCycle                = TIMER_PERIOD_TICKS / 2u;

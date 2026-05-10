@@ -10,10 +10,10 @@
 /** \brief 1ms periodic task - HC-12 수신 처리 */
 void AppTask_1ms(void);
 
-/** \brief 10ms periodic task - 모터 제어 */
+/** \brief 10ms periodic task - Vehicle 제어 업데이트 */
 void AppTask_10ms(void);
 
-/** \brief 100ms periodic task - LED 하트비트, 상태 출력 */
+/** \brief 100ms periodic task - LED 하트비트 */
 void AppTask_100ms(void);
 
 #endif /* APPTASK_H */
