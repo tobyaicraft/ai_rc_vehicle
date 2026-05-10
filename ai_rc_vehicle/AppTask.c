@@ -113,14 +113,11 @@ void AppTask_1ms(void)
 void AppTask_10ms(void)
 {
     /* 키 타임아웃: CMD_TIMEOUT_MS 동안 입력 없으면 정지 */
-    /* TODO: HC-12 연결 후 활성화 */
-#if 0
     uint32 elapsed = g_1ms_counter - s_lastCmdTime;
     if (elapsed > CMD_TIMEOUT_MS)
     {
         g_vehicleCmd = VEHICLE_STOP;
     }
-#endif
 
     AppVehicle_Update();
 }
