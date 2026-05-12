@@ -5,7 +5,7 @@
  * FL: TOM0_Ch0  -> TOUT26 -> P33.4  (X102 pin 14)
  * FR: TOM0_Ch1  -> TOUT27 -> P33.5  (X102 pin 13)
  * RL: TOM0_Ch6  -> TOUT4  -> P02.4  (X103 pin 17)
- * RR: TOM0_Ch7  -> TOUT7  -> P02.7  (X103 pin 20)
+ * RR: TOM0_Ch13 -> TOUT5  -> P02.5  (X103 pin 18)
  *********************************************************************************************************************/
 #ifndef DRVPWM_H
 #define DRVPWM_H

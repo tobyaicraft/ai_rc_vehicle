@@ -4,11 +4,11 @@
  *
  * Clock chain:
  *   GTM GCLK  = 100 MHz
- *   FXCLK2    = GCLK / 256 = 390,625 Hz
- *   period    = 3906 ticks → ~100 Hz PWM
+ *   FXCLK1    = GCLK / 16 = 6,250,000 Hz
+ *   period    = 6250 ticks → 1 kHz PWM
  *
  * FL: TOM0_Ch0  -> P33.4   FR: TOM0_Ch1  -> P33.5
- * RL: TOM0_Ch6  -> P02.4   RR: TOM0_Ch13 -> P02.5
+ * RL: TOM0_Ch6  -> P02.4   RR: TOM0_Ch13  -> P02.5
  *
  * 주의: GTM Enable 및 FXCLK 활성화는 DrvGtmTimer_Init()에서 수행됨
  *       반드시 DrvGtmTimer_Init() 이후에 호출할 것
@@ -35,13 +35,13 @@ static void initTomPwm(IfxGtm_Tom_Timer *timer, Ifx_GTM *gtm,
     IfxGtm_Tom_Timer_Config cfg;
     IfxGtm_Tom_Timer_initConfig(&cfg, gtm);
 
-    cfg.base.frequency       = 100;          /* 100 Hz PWM */
+    cfg.base.frequency       = 1000;         /* 1 kHz PWM */
     cfg.base.isrPriority     = 0;            /* ISR 불필요 */
     cfg.base.isrProvider     = IfxSrc_Tos_cpu0;
-    cfg.base.minResolution   = (1.0 / cfg.base.frequency) / 1000;
+    cfg.base.minResolution   = (1.0 / cfg.base.frequency) / 100;
     cfg.tom                  = tom;
     cfg.timerChannel         = ch;
-    cfg.clock                = IfxGtm_Tom_Ch_ClkSrc_cmuFxclk2;  /* GCLK/256 */
+    cfg.clock                = IfxGtm_Tom_Ch_ClkSrc_cmuFxclk1;  /* GCLK/16 = 6.25MHz */
 
     cfg.triggerOut                      = pin;
     cfg.base.trigger.outputEnabled      = TRUE;
@@ -85,9 +85,9 @@ void DrvPwm_Init(void)
     initTomPwm(&s_tomRL, gtm, IfxGtm_Tom_0, IfxGtm_Tom_Ch_6,
                &IfxGtm_TOM0_6_TOUT4_P02_4_OUT);
 
-    /* RR: TOM0_Ch7 -> P02.7 (X103 pin 20) — Ch13(TGC1) 출력 불가로 Ch7(TGC0)로 변경 */
-    initTomPwm(&s_tomRR, gtm, IfxGtm_Tom_0, IfxGtm_Tom_Ch_7,
-               &IfxGtm_TOM0_7_TOUT7_P02_7_OUT);
+    /* RR: TOM0_Ch13 -> P02.5 (X103 pin 18) */
+    initTomPwm(&s_tomRR, gtm, IfxGtm_Tom_0, IfxGtm_Tom_Ch_13,
+               &IfxGtm_TOM0_13_TOUT5_P02_5_OUT);
 
     /* 모든 TOM 채널 설정 완료 후 FXCLK 활성화 */
     IfxGtm_Cmu_enableClocks(gtm, IFXGTM_CMU_CLKEN_FXCLK);

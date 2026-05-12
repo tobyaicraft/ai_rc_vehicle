@@ -13,6 +13,9 @@
 #include "DrvGtmTimer.h"
 #include "DrvPwm.h"
 #include "DrvUart.h"
+#include "DrvUart1.h"
+#include "DrvAdc.h"
+#include "DrvUltrasonic.h"
 #include "AppVehicle.h"
 #include "Scheduler.h"
 
@@ -26,7 +29,10 @@ void core0_main(void)
     DrvDio_Init();
     DrvGtmTimer_Init();     /* GTM Enable + FXCLK + TOM0_Ch15 (1ms tick) */
     DrvPwm_Init();          /* TOM0_Ch0/1/6/13 (모터 PWM 100Hz) */
-    DrvUart_Init();         /* ASCLIN0 115200 (HC-12) */
+    DrvUart_Init();         /* ASCLIN0 9600 (HC-12) */
+    DrvUart1_Init();        /* ASCLIN1 9600 (HC-10 BLE) */
+    DrvAdc_Init();          /* VADC IR sensors (AN1, AN12) */
+    DrvUltrasonic_Init();   /* HC-SR04 (Trig=P02.6 GPIO, Echo=P02.7 TIM0_7) */
 
     AppVehicle_Init();
 
@@ -34,6 +40,7 @@ void core0_main(void)
     IfxCpu_enableInterrupts();
 
     DrvUart_SendString("=== AI RC Vehicle Ready ===\r\n");
+    DrvUart1_SendString("=== AI RC Vehicle Ready (BLE) ===\r\n");
 
     /* 메인 루프: 스케줄러 실행 */
     while (1)
