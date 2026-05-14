@@ -1,14 +1,9 @@
 /**********************************************************************************************************************
  * \file AppVehicle.c
  * \brief 4WD RC Vehicle 제어 모듈
- *
- * VehicleCommand에 따라 4개 모터의 PWM duty + 방향을 설정
- * - 전진/후진: 4륜 동일 속도
- * - 좌/우 스핀: 양쪽 반대 방향 (제자리 회전)
  *********************************************************************************************************************/
 #include "AppVehicle.h"
-#include "DrvPwm.h"
-#include "DrvDio.h"
+#include "DrvMotor.h"
 
 /******************************************************************************/
 /*                           Global Variables                                 */
@@ -22,60 +17,49 @@ volatile float32 g_vehicleSpeed = 50.0f;
 void AppVehicle_Init(void)
 {
     g_vehicleCmd   = VEHICLE_STOP;
-    g_vehicleSpeed = 50.0f;
+    g_vehicleSpeed = 80.0f;
 }
 
 void AppVehicle_Update(void)
 {
-    float32 speed = g_vehicleSpeed;
-    MotorDirection dirFL, dirFR, dirRL, dirRR;
-    float32 dutyFL, dutyFR, dutyRL, dutyRR;
+    sint16 spd  = (sint16)g_vehicleSpeed;
+    sint16 spdF = (sint16)(g_vehicleSpeed * 0.86f);  /* 전륜 보정 */
 
     switch ((VehicleCommand)g_vehicleCmd)
     {
     case VEHICLE_FORWARD:
-        dirFL = MOTOR_FORWARD;  dirFR = MOTOR_FORWARD;
-        dirRL = MOTOR_FORWARD;  dirRR = MOTOR_FORWARD;
-        dutyFL = speed * 0.86f;  dutyFR = speed * 0.86f;
-        dutyRL = speed;          dutyRR = speed;
+        DrvMotor_SetDuty(MOTOR_FL,  spdF);
+        DrvMotor_SetDuty(MOTOR_FR,  spdF);
+        DrvMotor_SetDuty(MOTOR_RL,  spd);
+        DrvMotor_SetDuty(MOTOR_RR,  spd);
         break;
 
     case VEHICLE_REVERSE:
-        dirFL = MOTOR_REVERSE;  dirFR = MOTOR_REVERSE;
-        dirRL = MOTOR_REVERSE;  dirRR = MOTOR_REVERSE;
-        dutyFL = speed * 0.86f;  dutyFR = speed * 0.86f;
-        dutyRL = speed;          dutyRR = speed;
+        DrvMotor_SetDuty(MOTOR_FL, -spdF);
+        DrvMotor_SetDuty(MOTOR_FR, -spdF);
+        DrvMotor_SetDuty(MOTOR_RL, -spd);
+        DrvMotor_SetDuty(MOTOR_RR, -spd);
         break;
 
     case VEHICLE_SPIN_LEFT:
-        dirFL = MOTOR_REVERSE;  dirFR = MOTOR_FORWARD;
-        dirRL = MOTOR_REVERSE;  dirRR = MOTOR_FORWARD;
-        dutyFL = speed * 0.86f;  dutyFR = speed * 0.86f;
-        dutyRL = speed;          dutyRR = speed;
+        DrvMotor_SetDuty(MOTOR_FL, -spdF);
+        DrvMotor_SetDuty(MOTOR_FR,  spdF);
+        DrvMotor_SetDuty(MOTOR_RL, -spd);
+        DrvMotor_SetDuty(MOTOR_RR,  spd);
         break;
 
     case VEHICLE_SPIN_RIGHT:
-        dirFL = MOTOR_FORWARD;  dirFR = MOTOR_REVERSE;
-        dirRL = MOTOR_FORWARD;  dirRR = MOTOR_REVERSE;
-        dutyFL = speed * 0.86f;  dutyFR = speed * 0.86f;
-        dutyRL = speed;          dutyRR = speed;
+        DrvMotor_SetDuty(MOTOR_FL,  spdF);
+        DrvMotor_SetDuty(MOTOR_FR, -spdF);
+        DrvMotor_SetDuty(MOTOR_RL,  spd);
+        DrvMotor_SetDuty(MOTOR_RR, -spd);
         break;
 
     default: /* VEHICLE_STOP */
-        dirFL = MOTOR_STOP;  dirFR = MOTOR_STOP;
-        dirRL = MOTOR_STOP;  dirRR = MOTOR_STOP;
-        dutyFL = 0.0f;  dutyFR = 0.0f;
-        dutyRL = 0.0f;  dutyRR = 0.0f;
+        DrvMotor_Coast(MOTOR_FL);
+        DrvMotor_Coast(MOTOR_FR);
+        DrvMotor_Coast(MOTOR_RL);
+        DrvMotor_Coast(MOTOR_RR);
         break;
     }
-
-    DrvPwm_SetDutyFL(dutyFL);
-    DrvPwm_SetDutyFR(dutyFR);
-    DrvPwm_SetDutyRL(dutyRL);
-    DrvPwm_SetDutyRR(dutyRR);
-
-    DrvDio_SetMotorFL(dirFL);
-    DrvDio_SetMotorFR(dirFR);
-    DrvDio_SetMotorRL(dirRL);
-    DrvDio_SetMotorRR(dirRR);
 }

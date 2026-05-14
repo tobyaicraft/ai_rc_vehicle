@@ -19,6 +19,8 @@
 #include "DrvSpi.h"
 #include "DrvMpu9250.h"
 #include "AppVehicle.h"
+#include "DrvMotor.h"
+#include "AppMotorTest.h"
 #include "Scheduler.h"
 
 /******************************************************************************/
@@ -37,6 +39,7 @@ void core0_main(void)
     DrvUltrasonic_Init();   /* HC-SR04 (Trig=P02.6 GPIO, Echo=P02.7 TIM0_7) */
     DrvSpi_Init();          /* QSPI3 SPI Master (MPU-9250) */
 
+    DrvMotor_Init();
     AppVehicle_Init();
 
     /* 글로벌 인터럽트 Enable (SPI ISR 필요) */
@@ -51,6 +54,7 @@ void core0_main(void)
     /* 메인 루프: 스케줄러 실행 */
     while (1)
     {
-        Scheduler_Run();
+        AppMotorTest_Sequence();
+        //Scheduler_Run();
     }
 }

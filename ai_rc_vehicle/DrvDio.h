@@ -15,9 +15,10 @@
 
 typedef enum
 {
-    MOTOR_STOP    = 0,
-    MOTOR_FORWARD = 1,
-    MOTOR_REVERSE = 2
+    MOTOR_STOP    = 0,   /* IN1=L, IN2=L (coast) */
+    MOTOR_FORWARD = 1,   /* IN1=H, IN2=L */
+    MOTOR_REVERSE = 2,   /* IN1=L, IN2=H */
+    MOTOR_BRAKE   = 3    /* IN1=H, IN2=H (short brake) */
 } MotorDirection;
 
 void DrvDio_Init(void);

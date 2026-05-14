@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: "맑은 고딕", sans-serif; font-size: 11pt; color: #1a1a1a; margin: 40px; line-height: 1.7; }
+  h1 { font-size: 16pt; color: #1a3a6e; border-bottom: 2px solid #1a3a6e; padding-bottom: 6px; margin-top: 36px; }
+  h2 { font-size: 13pt; color: #1a3a6e; margin-top: 28px; }
+  h3 { font-size: 11pt; color: #2c5fa8; margin-top: 20px; }
+  pre {
+    background: #f4f6fa;
+    border: 1px solid #c8d4e8;
+    border-left: 4px solid #2c5fa8;
+    padding: 14px 18px;
+    font-family: Consolas, monospace;
+    font-size: 10pt;
+    line-height: 1.6;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  code { font-family: Consolas, monospace; font-size: 10pt; background: #eef1f8; padding: 1px 5px; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 10.5pt; }
+  th { background: #1a3a6e; color: white; padding: 8px 12px; text-align: left; }
+  td { border: 1px solid #c8d4e8; padding: 7px 12px; vertical-align: top; }
+  tr:nth-child(even) td { background: #f4f7fc; }
+  .prompt-box {
+    background: #fffbe6;
+    border: 1px solid #e6c84a;
+    border-left: 4px solid #e6a800;
+    padding: 16px 20px;
+    font-family: Consolas, monospace;
+    font-size: 10pt;
+    line-height: 1.7;
+    white-space: pre-wrap;
+  }
+  .note {
+    background: #eaf4ff;
+    border-left: 4px solid #2c5fa8;
+    padding: 10px 16px;
+    font-size: 10.5pt;
+    margin: 12px 0;
+  }
+  .warn {
+    background: #fff4e6;
+    border-left: 4px solid #e67e00;
+    padding: 10px 16px;
+    font-size: 10.5pt;
+    margin: 12px 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>2.5 AI와 함께하는 TC237 모터 구동 실습</h1>
+
+<p>이번 절에서는 실제로 Claude Code에 요청하여 TC237 기반 4WD 모터 드라이버를 설계합니다.
+AI가 생성한 코드를 그대로 쓰는 것이 아니라 — 어떻게 요청하고, 어떻게 검증하고, 어떻게 수정하는지를 함께 살펴봅니다.</p>
+
+
+<!-- ───────────────────────────────────────── -->
+<h1>AI에게 드라이버 코드 요청하기</h1>
+
+<p>Claude Code에 다음과 같이 요청합니다.</p>
+
+<div class="prompt-box">TC237(AURIX)에서 L298N 모터 드라이버로 DC 모터 4개(4WD)를
+제어하는 코드를 작성해줘. ILLD 라이브러리 사용, 다음 구조로:
+
+[하드웨어 핀]
+PWM (GTM TOM0, 1kHz):
+  FL: TOM0_Ch0  → P33.4
+  FR: TOM0_Ch1  → P33.5
+  RL: TOM0_Ch6  → P02.4
+  RR: TOM0_Ch13 → P02.5
+
+방향 제어 GPIO (H-Bridge IN1/IN2):
+  FL: IN1=P33.2,  IN2=P33.3
+  FR: IN1=P33.1,  IN2=P33.12  (방향 반전 보정)
+  RL: IN1=P00.0,  IN2=P00.1   (방향 반전 보정)
+  RR: IN1=P00.2,  IN2=P00.3
+
+[계층 구조]
+HAL Layer   : DrvPwm.c / DrvDio.c  (ILLD 직접 호출)
+Driver Layer: DrvMotor.c            (HAL 래퍼)
+App Layer   : AppVehicle.c          (차량 동작 로직)
+
+[DrvMotor API]
+void DrvMotor_Init(void);
+void DrvMotor_SetDuty(MotorId id, sint16 duty);  // -100~+100, 음수=역회전
+void DrvMotor_Brake(MotorId id);   // 능동 제동: IN1=H, IN2=H
+void DrvMotor_Coast(MotorId id);   // 자유 회전: IN1=L, IN2=L, PWM=0
+
+방향 전환 시 슛스루 방지 시퀀스:
+  PWM=0 → GPIO 방향 변경 → PWM 설정 순서로.
+
+[AppVehicle]
+명령: STOP / FORWARD / REVERSE / SPIN_LEFT / SPIN_RIGHT
+전륜 duty = speed * 0.86  (언더스티어 보정)
+초기 속도 80%</div>
+
+
+<!-- ───────────────────────────────────────── -->
+<h1>드라이버 계층 설계</h1>
+
+<pre>[Application Layer]   ← RC카 동작 로직
+  AppVehicle_Update()
+       |
+       ▼
+[Driver Layer]        ← L298N 추상화
+  DrvMotor_SetDuty(id, duty)   // -100 ~ +100
+  DrvMotor_Brake(id)
+  DrvMotor_Coast(id)
+       |
+       ▼
+[HAL Layer]           ← TC237 ILLD 직접 호출
+  IfxGtm_Tom_Timer_setTrigger()      // PWM 듀티
+  IfxPort_setPinHigh / setPinLow()   // IN1, IN2 제어</pre>
+
+<div class="note">
+<b>설계 원칙:</b> Driver Layer는 L298N을 모른다. HAL Layer만 하드웨어를 안다.
+Application Layer는 방향이나 PWM을 모른다. duty 부호로 모든 것을 표현한다.
+</div>
+
+
+<!-- ───────────────────────────────────────── -->
+<h1>생성된 API 명세</h1>
+
+<h2>DrvMotor.h — Driver Layer</h2>
+
+<pre>typedef enum
+{
+    MOTOR_FL    = 0,   /* Front-Left  */
+    MOTOR_FR    = 1,   /* Front-Right */
+    MOTOR_RL    = 2,   /* Rear-Left   */
+    MOTOR_RR    = 3,   /* Rear-Right  */
+    MOTOR_COUNT = 4
+} MotorId;
+
+void DrvMotor_Init(void);
+void DrvMotor_SetDuty(MotorId id, sint16 duty);  /* -100 ~ +100 */
+void DrvMotor_Brake(MotorId id);
+void DrvMotor_Coast(MotorId id);</pre>
+
+<table>
+  <tr><th>함수</th><th>설명</th></tr>
+  <tr><td><code>DrvMotor_Init()</code></td><td>내부 방향 상태 초기화. DrvPwm_Init(), DrvDio_Init() 이후 호출.</td></tr>
+  <tr><td><code>DrvMotor_SetDuty(id, duty)</code></td>
+      <td>duty &gt; 0 : 정회전, duty &lt; 0 : 역회전, duty = 0 : 정지.<br>
+          방향 전환 시 자동으로 PWM=0 → 방향 변경 → PWM 설정 순서 실행.</td></tr>
+  <tr><td><code>DrvMotor_Brake(id)</code></td><td>능동 제동. IN1=H, IN2=H 상태로 모터를 단락시켜 즉시 제동.</td></tr>
+  <tr><td><code>DrvMotor_Coast(id)</code></td><td>자유 회전. PWM=0, IN1=L, IN2=L. 모터가 관성으로 멈춤.</td></tr>
+</table>
+
+<h3>방향 전환 슛스루 방지 시퀀스</h3>
+
+<pre>void DrvMotor_SetDuty(MotorId id, sint16 duty)
+{
+    ...
+    if (newDir != s_dir[id])
+    {
+        s_setDuty[id](0.0f);      /* 1. PWM = 0   */
+        s_setDir[id](newDir);     /* 2. 방향 변경  */
+        s_dir[id] = newDir;
+    }
+    s_setDuty[id](absDuty);       /* 3. PWM 설정  */
+}</pre>
+
+<div class="warn">
+<b>AI 코드를 그대로 믿지 마세요.</b><br>
+방향 전환 시 PWM을 먼저 0으로 내리지 않으면 — H-Bridge 양쪽 스위치가 동시에 켜지는
+슛스루(Shoot-through) 현상이 발생할 수 있습니다. AI가 생성한 코드에서 이 부분이
+빠지는 경우가 종종 있습니다.
+</div>
+
+<h2>DrvDio.h — MotorDirection enum</h2>
+
+<table>
+  <tr><th>상태</th><th>IN1</th><th>IN2</th><th>동작</th></tr>
+  <tr><td><code>MOTOR_STOP</code></td><td>LOW</td><td>LOW</td><td>자유 회전 (Coast)</td></tr>
+  <tr><td><code>MOTOR_FORWARD</code></td><td>HIGH</td><td>LOW</td><td>정회전</td></tr>
+  <tr><td><code>MOTOR_REVERSE</code></td><td>LOW</td><td>HIGH</td><td>역회전</td></tr>
+  <tr><td><code>MOTOR_BRAKE</code></td><td>HIGH</td><td>HIGH</td><td>능동 제동</td></tr>
+</table>
+
+<h2>AppVehicle — Application Layer</h2>
+
+<table>
+  <tr><th>명령</th><th>FL</th><th>FR</th><th>RL</th><th>RR</th></tr>
+  <tr><td><code>VEHICLE_FORWARD</code></td><td>+spdF</td><td>+spdF</td><td>+spd</td><td>+spd</td></tr>
+  <tr><td><code>VEHICLE_REVERSE</code></td><td>-spdF</td><td>-spdF</td><td>-spd</td><td>-spd</td></tr>
+  <tr><td><code>VEHICLE_SPIN_LEFT</code></td><td>-spdF</td><td>+spdF</td><td>-spd</td><td>+spd</td></tr>
+  <tr><td><code>VEHICLE_SPIN_RIGHT</code></td><td>+spdF</td><td>-spdF</td><td>+spd</td><td>-spd</td></tr>
+  <tr><td><code>VEHICLE_STOP</code></td><td colspan="4">Coast (전 모터)</td></tr>
+</table>
+
+<p>spdF = speed × 0.86 (전륜 언더스티어 보정)</p>
+
+
+<!-- ───────────────────────────────────────── -->
+<h1>동작 확인 — 테스트 시퀀스</h1>
+
+<p>코드를 빌드하고 보드에 다운로드한 뒤, RC카를 평평한 바닥에 놓고 다음 시퀀스로 테스트합니다.</p>
+
+<pre>/* AppMotorTest.c — 동작 확인 시퀀스 */
+
+void AppMotorTest_Sequence(void)
+{
+    /* 전진 2초 */
+    DrvMotor_SetDuty(MOTOR_FL, +50);
+    DrvMotor_SetDuty(MOTOR_FR, +50);
+    DrvMotor_SetDuty(MOTOR_RL, +50);
+    DrvMotor_SetDuty(MOTOR_RR, +50);
+    delay_ms(2000);
+
+    /* 역회전 2초 */
+    DrvMotor_SetDuty(MOTOR_FL, -50);
+    DrvMotor_SetDuty(MOTOR_FR, -50);
+    DrvMotor_SetDuty(MOTOR_RL, -50);
+    DrvMotor_SetDuty(MOTOR_RR, -50);
+    delay_ms(2000);
+
+    /* 능동 제동 2초 */
+    DrvMotor_Brake(MOTOR_FL);
+    DrvMotor_Brake(MOTOR_FR);
+    DrvMotor_Brake(MOTOR_RL);
+    DrvMotor_Brake(MOTOR_RR);
+    delay_ms(2000);
+
+    /* 정지 */
+    DrvMotor_Coast(MOTOR_FL);
+    DrvMotor_Coast(MOTOR_FR);
+    DrvMotor_Coast(MOTOR_RL);
+    DrvMotor_Coast(MOTOR_RR);
+}</pre>
+
+<p>RC카가 — 2초 전진, 2초 후진, 2초 정지를 반복하면 성공입니다.</p>
+
+<div class="warn">
+<b>만약 한쪽 모터가 반대 방향으로 도는 것 같다면</b> — 그 모터의 OUT1/OUT2 단자를
+서로 바꿔 끼우면 됩니다. 코드를 수정할 필요는 없습니다.
+</div>
+
+<div class="note">
+<b>PWM 주파수에 대하여</b><br>
+20kHz는 가청 주파수를 피하기 위한 선택이지만, L298N은 구형 바이폴라 IC라
+고주파 스위칭 시 내부 손실이 커집니다. 실측 결과 1kHz에서 토크가 더 강하게
+나타났습니다. L298N 환경에서는 <b>1kHz가 최적</b>입니다.
+</div>
+
+</body>
+</html>

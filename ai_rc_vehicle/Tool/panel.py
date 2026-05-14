@@ -130,7 +130,7 @@ class RcDashboard:
         self.ser = None
         self.connected = False
         self.active_key = None
-        self.speed = 5
+        self.speed = 8
         self.sending = False
 
         self.ir_left = 0; self.ir_right = 0; self.us_dist = 0

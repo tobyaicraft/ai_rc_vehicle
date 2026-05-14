@@ -67,7 +67,11 @@ void DrvDio_SetMotorFL(MotorDirection dir)
         IfxPort_setPinLow(&MODULE_P33, 2);
         IfxPort_setPinHigh(&MODULE_P33, 3);
         break;
-    default:
+    case MOTOR_BRAKE:
+        IfxPort_setPinHigh(&MODULE_P33, 2);
+        IfxPort_setPinHigh(&MODULE_P33, 3);
+        break;
+    default: /* MOTOR_STOP */
         IfxPort_setPinLow(&MODULE_P33, 2);
         IfxPort_setPinLow(&MODULE_P33, 3);
         break;
@@ -87,7 +91,11 @@ void DrvDio_SetMotorFR(MotorDirection dir)
         IfxPort_setPinHigh(&MODULE_P33, 1);
         IfxPort_setPinLow(&MODULE_P33, 12);
         break;
-    default:
+    case MOTOR_BRAKE:
+        IfxPort_setPinHigh(&MODULE_P33, 1);
+        IfxPort_setPinHigh(&MODULE_P33, 12);
+        break;
+    default: /* MOTOR_STOP */
         IfxPort_setPinLow(&MODULE_P33, 1);
         IfxPort_setPinLow(&MODULE_P33, 12);
         break;
@@ -107,7 +115,11 @@ void DrvDio_SetMotorRL(MotorDirection dir)
         IfxPort_setPinHigh(&MODULE_P00, 0);
         IfxPort_setPinLow(&MODULE_P00, 1);
         break;
-    default:
+    case MOTOR_BRAKE:
+        IfxPort_setPinHigh(&MODULE_P00, 0);
+        IfxPort_setPinHigh(&MODULE_P00, 1);
+        break;
+    default: /* MOTOR_STOP */
         IfxPort_setPinLow(&MODULE_P00, 0);
         IfxPort_setPinLow(&MODULE_P00, 1);
         break;
@@ -127,7 +139,11 @@ void DrvDio_SetMotorRR(MotorDirection dir)
         IfxPort_setPinLow(&MODULE_P00, 2);
         IfxPort_setPinHigh(&MODULE_P00, 3);
         break;
-    default:
+    case MOTOR_BRAKE:
+        IfxPort_setPinHigh(&MODULE_P00, 2);
+        IfxPort_setPinHigh(&MODULE_P00, 3);
+        break;
+    default: /* MOTOR_STOP */
         IfxPort_setPinLow(&MODULE_P00, 2);
         IfxPort_setPinLow(&MODULE_P00, 3);
         break;
