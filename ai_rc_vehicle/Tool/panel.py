@@ -1,10 +1,11 @@
 """
-RC Car Control Panel (Controller + Sensor Monitor)
-───────────────────────────────────────────────────
-HC-12 시리얼 하나로 조종(TX) + 센서 모니터(RX) 통합.
+RC Car Telemetry Dashboard
+───────────────────────────
+HC-12 wireless: control(TX) + sensor/IMU monitor(RX)
 
-TX: 방향키 ESC 시퀀스 (0x1B 5B 41~44), 속도 '1'~'9'
-RX: "L:xxxx,R:xxxx,U:xxx\r\n"
+TX: Arrow ESC sequences (0x1B 5B 41~44), speed '1'~'9'
+RX: "L:xxxx,R:xxxx,U:xxx\r\n"  (IR + Ultrasonic)
+    "R:+xxx.x,P:+xxx.x,Y:+xxx.x\r\n"  (IMU attitude)
 
 Usage:
     python panel.py
@@ -18,10 +19,12 @@ from collections import deque
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import matplotlib.animation as animation
 
 try:
@@ -36,196 +39,215 @@ DEFAULT_BAUD = 38400
 ADC_MAX = 4095
 VAREF = 5.0
 HISTORY_SIZE = 200
-SEND_INTERVAL = 0.05  # 50ms key repeat
+SEND_INTERVAL = 0.05
 
 # ── Color Palette ────────────────────────────────────────────────────────────
-BG_COLOR = "#1e1e2e"
-FG_COLOR = "#cdd6f4"
-ACCENT_L = "#89b4fa"
-ACCENT_R = "#f38ba8"
-ACCENT_U = "#a6e3a1"
-PHOS = "#00ff88"
-WARN_COLOR = "#f9e2af"
-DANGER_COLOR = "#f38ba8"
-CHART_BG = "#181825"
-GRID_COLOR = "#313244"
-TEXT_DIM = "#6c7086"
-PANEL_BG = "#11111b"
+BG        = "#0a0a12"
+PANEL_BG  = "#0e0e1a"
+CARD_BG   = "#141422"
+FG        = "#e0e0f0"
+FG_DIM    = "#5a5a7a"
+ACCENT    = "#00ff88"
+ACCENT2   = "#00ccff"
+ACCENT_L  = "#5b9aff"
+ACCENT_R  = "#ff5b8a"
+ACCENT_U  = "#5bff9a"
+ACCENT_Y  = "#ffcc00"
+WARN      = "#f9e2af"
+DANGER    = "#ff4466"
+GRID_CLR  = "#1a1a2e"
+CHART_BG  = "#0c0c18"
+GLOW_GREEN = "#00ff8855"
+GLOW_BLUE  = "#00ccff55"
 
 # ── Arrow key map ────────────────────────────────────────────────────────────
 ARROW_MAP = {
-    'Up':    b'\x1b[A',
-    'Down':  b'\x1b[B',
-    'Right': b'\x1b[C',
-    'Left':  b'\x1b[D',
+    'Up': b'\x1b[A', 'Down': b'\x1b[B',
+    'Right': b'\x1b[C', 'Left': b'\x1b[D',
 }
 CMD_NAME = {
-    'Up': 'FWD  ↑', 'Down': 'REV  ↓',
-    'Left': 'L-SPIN ←', 'Right': 'R-SPIN →',
+    'Up': 'FORWARD', 'Down': 'REVERSE',
+    'Left': 'LEFT SPIN', 'Right': 'RIGHT SPIN',
 }
-
 USB_KW = ("PL2303", "Prolific", "CH340", "FTDI", "Silicon", "CP210", "USB Serial")
 
 
-def adc_to_voltage(adc_val):
-    return adc_val / ADC_MAX * VAREF
+def adc_to_voltage(v): return v / ADC_MAX * VAREF
+def voltage_to_distance_cm(v):
+    if v < 0.3: return 80.0
+    if v > 3.2: return 10.0
+    try: d = 29.988 * pow(v, -1.173)
+    except: return 80.0
+    return max(10.0, min(80.0, d))
 
 
-def voltage_to_distance_cm(voltage):
-    if voltage < 0.3:
-        return 80.0
-    if voltage > 3.2:
-        return 10.0
-    try:
-        dist = 29.988 * pow(voltage, -1.173)
-    except (ValueError, ZeroDivisionError):
-        return 80.0
-    return max(10.0, min(80.0, dist))
+# ── 3D Car Model ─────────────────────────────────────────────────────────────
+CAR_BODY = np.array([
+    [-1.0, -1.8, -0.3], [ 1.0, -1.8, -0.3],
+    [ 1.0,  1.8, -0.3], [-1.0,  1.8, -0.3],
+    [-1.0, -1.8,  0.3], [ 1.0, -1.8,  0.3],
+    [ 1.0,  1.8,  0.3], [-1.0,  1.8,  0.3],
+])
+CAR_FACES = [
+    [0,1,2,3],[4,5,6,7],[0,1,5,4],[2,3,7,6],[0,3,7,4],[1,2,6,5]
+]
+CAR_COLORS = [
+    (0.08,0.08,0.15,0.9), (0.12,0.12,0.25,0.9),
+    (0.8,0.2,0.2,0.8), (0.15,0.15,0.4,0.8),
+    (0.9,0.7,0.1,0.8), (0.1,0.8,0.3,0.8),
+]
+
+WHEEL_W, WHEEL_H, WHEEL_D = 0.25, 0.5, 0.2
+def make_wheel(cx, cy, cz):
+    return np.array([
+        [cx-WHEEL_W, cy-WHEEL_H, cz-WHEEL_D],[cx+WHEEL_W, cy-WHEEL_H, cz-WHEEL_D],
+        [cx+WHEEL_W, cy+WHEEL_H, cz-WHEEL_D],[cx-WHEEL_W, cy+WHEEL_H, cz-WHEEL_D],
+        [cx-WHEEL_W, cy-WHEEL_H, cz+WHEEL_D],[cx+WHEEL_W, cy-WHEEL_H, cz+WHEEL_D],
+        [cx+WHEEL_W, cy+WHEEL_H, cz+WHEEL_D],[cx-WHEEL_W, cy+WHEEL_H, cz+WHEEL_D],
+    ])
+
+WHEELS = [
+    make_wheel(-1.3, -1.2, -0.3), make_wheel(1.3, -1.2, -0.3),
+    make_wheel(-1.3,  1.2, -0.3), make_wheel(1.3,  1.2, -0.3),
+]
+
+def rotation_matrix(roll_deg, pitch_deg, yaw_deg):
+    r, p, y = np.radians(roll_deg), np.radians(pitch_deg), np.radians(yaw_deg)
+    Ry = np.array([[np.cos(r),0,np.sin(r)],[0,1,0],[-np.sin(r),0,np.cos(r)]])
+    Rx = np.array([[1,0,0],[0,np.cos(p),-np.sin(p)],[0,np.sin(p),np.cos(p)]])
+    Rz = np.array([[np.cos(y),-np.sin(y),0],[np.sin(y),np.cos(y),0],[0,0,1]])
+    return Rz @ Ry @ Rx
 
 
-class RcPanel:
+class RcDashboard:
     def __init__(self, root):
         self.root = root
-        self.root.title("RC Car Control Panel")
-        self.root.configure(bg=BG_COLOR)
-        self.root.geometry("1280x900")
-        self.root.minsize(1100, 800)
+        self.root.title("RC Car Telemetry Dashboard")
+        self.root.configure(bg=BG)
+        self.root.geometry("1400x920")
+        self.root.minsize(1200, 800)
 
-        # Serial
         self.ser = None
         self.connected = False
-
-        # Controller state
         self.active_key = None
         self.speed = 5
         self.sending = False
 
-        # Sensor state
-        self.ir_left = 0
-        self.ir_right = 0
-        self.us_dist = 0
+        self.ir_left = 0; self.ir_right = 0; self.us_dist = 0
+        self.roll = 0.0; self.pitch = 0.0; self.yaw = 0.0
         self.rx_count = 0
 
-        self.left_history = deque([0] * HISTORY_SIZE, maxlen=HISTORY_SIZE)
-        self.right_history = deque([0] * HISTORY_SIZE, maxlen=HISTORY_SIZE)
-        self.us_history = deque([0] * HISTORY_SIZE, maxlen=HISTORY_SIZE)
+        self.left_hist = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
+        self.right_hist = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
+        self.us_hist = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
 
         self._build_ui()
         self._bind_keys()
         self._start_animation()
 
-    # ════════════════════════════════════════════════════════════════════════
-    # UI Build
-    # ════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
+    # UI
+    # ════════════════════════════════════════════════════════════════
     def _build_ui(self):
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Dark.TFrame", background=BG_COLOR)
-        style.configure("Dark.TLabel", background=BG_COLOR, foreground=FG_COLOR,
-                        font=("Segoe UI", 10))
-        style.configure("Panel.TFrame", background=PANEL_BG)
-
         self._build_topbar()
 
-        # Main content: left (controller) | right (sensor)
-        main = ttk.Frame(self.root, style="Dark.TFrame")
-        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        main = tk.Frame(self.root, bg=BG)
+        main.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
 
-        self._build_controller_panel(main)
-        self._build_sensor_panel(main)
+        # Top row: Controller | 3D View | Sensors
+        top_row = tk.Frame(main, bg=BG)
+        top_row.pack(fill=tk.BOTH, expand=True)
+
+        self._build_controller(top_row)
+        self._build_3d_view(top_row)
+        self._build_sensor_panel(top_row)
+
+        # Bottom: Chart
+        self._build_chart(main)
 
     def _build_topbar(self):
-        top = tk.Frame(self.root, bg="#11111b", height=50)
-        top.pack(fill=tk.X)
-        top.pack_propagate(False)
+        bar = tk.Frame(self.root, bg="#06060e", height=52)
+        bar.pack(fill=tk.X)
+        bar.pack_propagate(False)
 
-        tk.Label(top, text="RC Car Control Panel", bg="#11111b", fg=PHOS,
-                 font=("Consolas", 14, "bold")).pack(side=tk.LEFT, padx=16, pady=10)
-
-        # LED
-        self._led_cv = tk.Canvas(top, width=14, height=14,
-                                  bg="#11111b", highlightthickness=0)
-        self._led_cv.pack(side=tk.LEFT, padx=(8, 3))
-        self._led = self._led_cv.create_oval(2, 2, 12, 12, fill=TEXT_DIM, outline="")
-
-        self._status_var = tk.StringVar(value="Disconnected")
-        tk.Label(top, textvariable=self._status_var, bg="#11111b", fg=TEXT_DIM,
-                 font=("Consolas", 10)).pack(side=tk.LEFT, padx=(2, 20))
+        # Title with glow effect
+        tk.Label(bar, text="RC CAR TELEMETRY", bg="#06060e", fg=ACCENT,
+                 font=("Consolas", 16, "bold")).pack(side=tk.LEFT, padx=20)
+        tk.Label(bar, text="DASHBOARD", bg="#06060e", fg=ACCENT2,
+                 font=("Consolas", 16, "bold")).pack(side=tk.LEFT)
 
         # Connect button
-        self._btn_conn = tk.Button(top, text="Connect", width=10,
-                                    bg="#162035", fg=FG_COLOR, relief=tk.FLAT,
+        self._btn_conn = tk.Button(bar, text="CONNECT", width=12,
+                                    bg="#1a2040", fg=ACCENT, relief=tk.FLAT,
                                     font=("Consolas", 10, "bold"), cursor="hand2",
+                                    activebackground="#2a3060",
                                     command=self._toggle_connect)
         self._btn_conn.pack(side=tk.RIGHT, padx=16)
 
         # Baud
-        self._baud_combo = ttk.Combobox(top, width=7, state="readonly",
-                                         font=("Consolas", 9))
-        self._baud_combo["values"] = ["9600", "19200", "38400", "57600", "115200"]
+        self._baud_combo = ttk.Combobox(bar, width=7, state="readonly", font=("Consolas", 9))
+        self._baud_combo["values"] = ["9600","19200","38400","57600","115200"]
         self._baud_combo.set("38400")
-        self._baud_combo.pack(side=tk.RIGHT, padx=(5, 0))
-        tk.Label(top, text="Baud:", bg="#11111b", fg=TEXT_DIM,
-                 font=("Consolas", 10)).pack(side=tk.RIGHT)
+        self._baud_combo.pack(side=tk.RIGHT, padx=4)
 
-        # Port combo
-        self._combo = ttk.Combobox(top, width=14, state="readonly",
-                                    font=("Consolas", 9))
-        self._combo.pack(side=tk.RIGHT, padx=(5, 10))
+        # Port
+        self._combo = ttk.Combobox(bar, width=10, state="readonly", font=("Consolas", 9))
+        self._combo.pack(side=tk.RIGHT, padx=4)
 
-        tk.Button(top, text="Scan", width=5, bg="#162035", fg=FG_COLOR,
-                  relief=tk.FLAT, font=("Consolas", 9), cursor="hand2",
-                  command=self._refresh_ports).pack(side=tk.RIGHT, padx=(5, 0))
+        tk.Button(bar, text="SCAN", width=5, bg="#1a2040", fg=FG_DIM, relief=tk.FLAT,
+                  font=("Consolas", 9), cursor="hand2",
+                  command=self._refresh_ports).pack(side=tk.RIGHT, padx=4)
 
-        tk.Label(top, text="Port:", bg="#11111b", fg=TEXT_DIM,
-                 font=("Consolas", 10)).pack(side=tk.RIGHT)
+        # Status
+        self._led_cv = tk.Canvas(bar, width=12, height=12, bg="#06060e", highlightthickness=0)
+        self._led_cv.pack(side=tk.RIGHT, padx=(10,4))
+        self._led = self._led_cv.create_oval(1,1,11,11, fill=FG_DIM, outline="")
 
-        # RX count
-        self._rx_var = tk.StringVar(value="RX: 0")
-        tk.Label(top, textvariable=self._rx_var, bg="#11111b", fg=WARN_COLOR,
-                 font=("Consolas", 9)).pack(side=tk.RIGHT, padx=(0, 15))
+        self._status_var = tk.StringVar(value="OFFLINE")
+        tk.Label(bar, textvariable=self._status_var, bg="#06060e", fg=FG_DIM,
+                 font=("Consolas", 9)).pack(side=tk.RIGHT, padx=4)
+
+        self._rx_var = tk.StringVar(value="")
+        tk.Label(bar, textvariable=self._rx_var, bg="#06060e", fg=ACCENT_Y,
+                 font=("Consolas", 9)).pack(side=tk.RIGHT, padx=(0,10))
 
         self._refresh_ports()
 
-    # ── Controller Panel (Left) ──────────────────────────────────────────────
-    def _build_controller_panel(self, parent):
-        left = tk.Frame(parent, bg=PANEL_BG, width=320, relief=tk.FLAT,
-                        highlightbackground=GRID_COLOR, highlightthickness=1)
-        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5), pady=5)
-        left.pack_propagate(False)
+    # ── Controller ───────────────────────────────────────────────
+    def _build_controller(self, parent):
+        f = tk.Frame(parent, bg=CARD_BG, width=280,
+                     highlightbackground="#1e1e3a", highlightthickness=1)
+        f.pack(side=tk.LEFT, fill=tk.Y, padx=(0,4), pady=4)
+        f.pack_propagate(False)
 
-        tk.Label(left, text="CONTROLLER", bg=PANEL_BG, fg=PHOS,
-                 font=("Consolas", 12, "bold")).pack(pady=(15, 5))
+        tk.Label(f, text="CONTROL", bg=CARD_BG, fg=ACCENT,
+                 font=("Consolas", 11, "bold")).pack(pady=(12,4))
 
         # Command display
-        self._lbl_cmd = tk.Label(left, text="STOP", bg=PANEL_BG, fg=TEXT_DIM,
-                                  font=("Consolas", 22, "bold"))
-        self._lbl_cmd.pack(pady=(10, 15))
+        self._lbl_cmd = tk.Label(f, text="STANDBY", bg=CARD_BG, fg=FG_DIM,
+                                  font=("Consolas", 18, "bold"))
+        self._lbl_cmd.pack(pady=(8,12))
 
         # D-pad
-        grid = tk.Frame(left, bg=PANEL_BG)
+        grid = tk.Frame(f, bg=CARD_BG)
         grid.pack()
-
-        btn_cfg = dict(width=6, height=2, relief=tk.FLAT,
+        btn_cfg = dict(width=5, height=2, relief=tk.FLAT,
                        font=("Consolas", 16, "bold"), cursor="hand2",
-                       activebackground="#2a3850")
+                       activebackground="#2a2a50")
 
-        tk.Label(grid, bg=PANEL_BG, width=6).grid(row=0, column=0)
-        self._btn_up = tk.Button(grid, text="▲", bg="#162035", fg=FG_COLOR, **btn_cfg)
-        self._btn_up.grid(row=0, column=1, padx=3, pady=3)
-        tk.Label(grid, bg=PANEL_BG, width=6).grid(row=0, column=2)
+        tk.Label(grid, bg=CARD_BG, width=5).grid(row=0, column=0)
+        self._btn_up = tk.Button(grid, text="W", bg="#1a1a30", fg=FG, **btn_cfg)
+        self._btn_up.grid(row=0, column=1, padx=2, pady=2)
 
-        self._btn_left = tk.Button(grid, text="◄", bg="#162035", fg=FG_COLOR, **btn_cfg)
-        self._btn_left.grid(row=1, column=0, padx=3, pady=3)
-        self._btn_stop = tk.Button(grid, text="■", bg="#1a1020", fg=DANGER_COLOR, **btn_cfg)
-        self._btn_stop.grid(row=1, column=1, padx=3, pady=3)
-        self._btn_right = tk.Button(grid, text="►", bg="#162035", fg=FG_COLOR, **btn_cfg)
-        self._btn_right.grid(row=1, column=2, padx=3, pady=3)
+        self._btn_left = tk.Button(grid, text="A", bg="#1a1a30", fg=FG, **btn_cfg)
+        self._btn_left.grid(row=1, column=0, padx=2, pady=2)
+        self._btn_stop = tk.Button(grid, text="S", bg="#1a0a10", fg=DANGER, **btn_cfg)
+        self._btn_stop.grid(row=1, column=1, padx=2, pady=2)
+        self._btn_right = tk.Button(grid, text="D", bg="#1a1a30", fg=FG, **btn_cfg)
+        self._btn_right.grid(row=1, column=2, padx=2, pady=2)
 
-        tk.Label(grid, bg=PANEL_BG, width=6).grid(row=2, column=0)
-        self._btn_down = tk.Button(grid, text="▼", bg="#162035", fg=FG_COLOR, **btn_cfg)
-        self._btn_down.grid(row=2, column=1, padx=3, pady=3)
-        tk.Label(grid, bg=PANEL_BG, width=6).grid(row=2, column=2)
+        self._btn_down = tk.Button(grid, text="S", bg="#1a1a30", fg=FG, **btn_cfg)
+        self._btn_down.grid(row=2, column=1, padx=2, pady=2)
 
         self._dpad_btns = {
             'Up': self._btn_up, 'Down': self._btn_down,
@@ -233,335 +255,390 @@ class RcPanel:
         }
 
         # Speed
-        tk.Label(left, text="SPEED", bg=PANEL_BG, fg=TEXT_DIM,
-                 font=("Consolas", 10)).pack(pady=(25, 5))
+        tk.Label(f, text="THROTTLE", bg=CARD_BG, fg=FG_DIM,
+                 font=("Consolas", 9)).pack(pady=(20,4))
 
-        spd_frm = tk.Frame(left, bg=PANEL_BG)
-        spd_frm.pack()
+        self._lbl_speed = tk.Label(f, text="50%", bg=CARD_BG, fg=ACCENT,
+                                    font=("Consolas", 28, "bold"))
+        self._lbl_speed.pack()
 
+        spd_frm = tk.Frame(f, bg=CARD_BG)
+        spd_frm.pack(pady=6)
         self._speed_btns = {}
-        for i in range(1, 10):
+        for i in range(1,10):
             active = (i == self.speed)
-            btn = tk.Button(spd_frm, text=str(i), width=3, height=1,
-                            bg=PHOS if active else "#162035",
-                            fg=PANEL_BG if active else FG_COLOR,
-                            relief=tk.FLAT, font=("Consolas", 10, "bold"),
-                            cursor="hand2",
-                            command=lambda n=i: self._set_speed(n))
+            btn = tk.Button(spd_frm, text=str(i), width=2,
+                            bg=ACCENT if active else "#1a1a30",
+                            fg=BG if active else FG_DIM,
+                            relief=tk.FLAT, font=("Consolas", 9, "bold"),
+                            cursor="hand2", command=lambda n=i: self._set_speed(n))
             btn.pack(side=tk.LEFT, padx=1)
             self._speed_btns[i] = btn
 
-        self._lbl_speed = tk.Label(left, text=f"{self.speed * 10}%",
-                                    bg=PANEL_BG, fg=PHOS,
-                                    font=("Consolas", 18, "bold"))
-        self._lbl_speed.pack(pady=(8, 0))
+        # Speed bar
+        self._speed_bar = tk.Canvas(f, height=8, bg="#0a0a14", highlightthickness=0)
+        self._speed_bar.pack(fill=tk.X, padx=30, pady=(4,0))
+        self._draw_speed_bar()
 
-        # Footer
-        tk.Label(left, text="Arrow keys: drive\n1~9: speed\nESC: quit",
-                 bg=PANEL_BG, fg=TEXT_DIM, font=("Consolas", 9),
-                 justify=tk.CENTER).pack(side=tk.BOTTOM, pady=15)
+        tk.Label(f, text="Arrow keys / 1~9", bg=CARD_BG, fg=FG_DIM,
+                 font=("Consolas", 8)).pack(side=tk.BOTTOM, pady=10)
 
-    # ── Sensor Panel (Right) ─────────────────────────────────────────────────
+    # ── 3D Attitude View ─────────────────────────────────────────
+    def _build_3d_view(self, parent):
+        f = tk.Frame(parent, bg=CARD_BG,
+                     highlightbackground="#1e1e3a", highlightthickness=1)
+        f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        tk.Label(f, text="3D ATTITUDE", bg=CARD_BG, fg=ACCENT2,
+                 font=("Consolas", 11, "bold")).pack(pady=(8,0))
+
+        # Attitude numbers
+        att_frm = tk.Frame(f, bg=CARD_BG)
+        att_frm.pack(pady=(2,0))
+
+        for label, color, attr in [("ROLL","#5b9aff","_lbl_roll"),
+                                    ("PITCH","#ff9a5b","_lbl_pitch"),
+                                    ("YAW","#ffcc00","_lbl_yaw")]:
+            cell = tk.Frame(att_frm, bg=CARD_BG)
+            cell.pack(side=tk.LEFT, padx=15)
+            tk.Label(cell, text=label, bg=CARD_BG, fg=FG_DIM,
+                     font=("Consolas", 8)).pack()
+            lbl = tk.Label(cell, text="+000.0", bg=CARD_BG, fg=color,
+                           font=("Consolas", 16, "bold"))
+            lbl.pack()
+            setattr(self, attr, lbl)
+
+        # 3D matplotlib canvas
+        self.fig3d = Figure(figsize=(5,4), dpi=100, facecolor='#0a0a14')
+        self.ax3d = self.fig3d.add_subplot(111, projection='3d')
+        self.ax3d.set_facecolor('#0a0a14')
+        self.canvas3d = FigureCanvasTkAgg(self.fig3d, master=f)
+        self.canvas3d.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=6, pady=(2,6))
+
+    # ── Sensor Panel ─────────────────────────────────────────────
     def _build_sensor_panel(self, parent):
-        right = tk.Frame(parent, bg=BG_COLOR)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0), pady=5)
+        f = tk.Frame(parent, bg=CARD_BG, width=280,
+                     highlightbackground="#1e1e3a", highlightthickness=1)
+        f.pack(side=tk.RIGHT, fill=tk.Y, padx=(4,0), pady=4)
+        f.pack_propagate(False)
 
-        tk.Label(right, text="SENSOR MONITOR", bg=BG_COLOR, fg=ACCENT_U,
-                 font=("Consolas", 12, "bold")).pack(pady=(5, 5))
+        tk.Label(f, text="PROXIMITY", bg=CARD_BG, fg=ACCENT_U,
+                 font=("Consolas", 11, "bold")).pack(pady=(12,8))
 
-        # Chart
-        chart_frm = tk.Frame(right, bg=BG_COLOR)
-        chart_frm.pack(fill=tk.BOTH, expand=True)
+        # Ultrasonic (big)
+        us_card = tk.Frame(f, bg="#0a0a18", highlightbackground="#1a3a2a",
+                           highlightthickness=1)
+        us_card.pack(fill=tk.X, padx=12, pady=(0,8))
 
-        self.fig = Figure(figsize=(7, 2.5), dpi=100, facecolor=CHART_BG)
-        self.ax = self.fig.add_subplot(111)
+        tk.Label(us_card, text="ULTRASONIC  FRONT", bg="#0a0a18", fg=ACCENT_U,
+                 font=("Consolas", 9)).pack(pady=(6,0))
+        self._lbl_us = tk.Label(us_card, text="0 cm", bg="#0a0a18", fg=ACCENT_U,
+                                 font=("Consolas", 32, "bold"))
+        self._lbl_us.pack(pady=(0,2))
+        self._us_bar = tk.Canvas(us_card, height=10, bg="#060612", highlightthickness=0)
+        self._us_bar.pack(fill=tk.X, padx=12, pady=(0,8))
+
+        # Car top-view with sensor beams
+        self.car_top = tk.Canvas(f, bg="#0a0a14", highlightthickness=0, height=200)
+        self.car_top.pack(fill=tk.X, padx=12, pady=4)
+
+        # IR Left
+        ir_frm = tk.Frame(f, bg=CARD_BG)
+        ir_frm.pack(fill=tk.X, padx=12, pady=(8,0))
+
+        left_card = tk.Frame(ir_frm, bg="#0a0a18", highlightbackground="#1a2a3a",
+                             highlightthickness=1)
+        left_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,3))
+        tk.Label(left_card, text="IR LEFT", bg="#0a0a18", fg=ACCENT_L,
+                 font=("Consolas", 8)).pack(pady=(4,0))
+        self._lbl_ir_l = tk.Label(left_card, text="0", bg="#0a0a18", fg=ACCENT_L,
+                                   font=("Consolas", 18, "bold"))
+        self._lbl_ir_l.pack()
+        self._lbl_ir_l_cm = tk.Label(left_card, text="-- cm", bg="#0a0a18", fg=FG_DIM,
+                                      font=("Consolas", 10))
+        self._lbl_ir_l_cm.pack(pady=(0,4))
+
+        # IR Right
+        right_card = tk.Frame(ir_frm, bg="#0a0a18", highlightbackground="#3a1a2a",
+                              highlightthickness=1)
+        right_card.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(3,0))
+        tk.Label(right_card, text="IR RIGHT", bg="#0a0a18", fg=ACCENT_R,
+                 font=("Consolas", 8)).pack(pady=(4,0))
+        self._lbl_ir_r = tk.Label(right_card, text="0", bg="#0a0a18", fg=ACCENT_R,
+                                   font=("Consolas", 18, "bold"))
+        self._lbl_ir_r.pack()
+        self._lbl_ir_r_cm = tk.Label(right_card, text="-- cm", bg="#0a0a18", fg=FG_DIM,
+                                      font=("Consolas", 10))
+        self._lbl_ir_r_cm.pack(pady=(0,4))
+
+    # ── Chart ────────────────────────────────────────────────────
+    def _build_chart(self, parent):
+        f = tk.Frame(parent, bg=CARD_BG, height=180,
+                     highlightbackground="#1e1e3a", highlightthickness=1)
+        f.pack(fill=tk.X, pady=(4,0))
+        f.pack_propagate(False)
+
+        self.fig_chart = Figure(figsize=(10,1.6), dpi=100, facecolor=CHART_BG)
+        self.ax_chart = self.fig_chart.add_subplot(111)
         self._setup_chart()
-        self.canvas = FigureCanvasTkAgg(self.fig, master=chart_frm)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.canvas_chart = FigureCanvasTkAgg(self.fig_chart, master=f)
+        self.canvas_chart.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        # Bottom: Left IR | Car | Right IR
-        bottom = tk.Frame(right, bg=BG_COLOR)
-        bottom.pack(fill=tk.BOTH, padx=5, pady=(5, 5))
-
-        # Left IR panel
-        lp = tk.Frame(bottom, bg=BG_COLOR, width=180)
-        lp.pack(side=tk.LEFT, fill=tk.Y)
-        lp.pack_propagate(False)
-
-        tk.Label(lp, text="LEFT IR (AN1)", bg=BG_COLOR, fg=ACCENT_L,
-                 font=("Segoe UI", 11, "bold")).pack(pady=(5, 0))
-        self.lbl_left_adc = tk.Label(lp, text="0", bg=BG_COLOR, fg=FG_COLOR,
-                                      font=("Consolas", 28, "bold"))
-        self.lbl_left_adc.pack()
-        self.lbl_left_volt = tk.Label(lp, text="0.000 V", bg=BG_COLOR, fg=FG_COLOR,
-                                       font=("Consolas", 11))
-        self.lbl_left_volt.pack()
-        self.lbl_left_dist = tk.Label(lp, text="-- cm", bg=BG_COLOR, fg=ACCENT_U,
-                                       font=("Consolas", 18, "bold"))
-        self.lbl_left_dist.pack(pady=(3, 0))
-        self.left_gauge = tk.Canvas(lp, height=14, bg=CHART_BG, highlightthickness=0)
-        self.left_gauge.pack(fill=tk.X, padx=12, pady=(6, 0))
-
-        # Car canvas (center)
-        cp = tk.Frame(bottom, bg=BG_COLOR)
-        cp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
-        self.car_canvas = tk.Canvas(cp, bg=CHART_BG, highlightthickness=0, height=280)
-        self.car_canvas.pack(fill=tk.BOTH, expand=True)
-
-        # Right IR panel
-        rp = tk.Frame(bottom, bg=BG_COLOR, width=180)
-        rp.pack(side=tk.RIGHT, fill=tk.Y)
-        rp.pack_propagate(False)
-
-        tk.Label(rp, text="RIGHT IR (AN12)", bg=BG_COLOR, fg=ACCENT_R,
-                 font=("Segoe UI", 11, "bold")).pack(pady=(5, 0))
-        self.lbl_right_adc = tk.Label(rp, text="0", bg=BG_COLOR, fg=FG_COLOR,
-                                       font=("Consolas", 28, "bold"))
-        self.lbl_right_adc.pack()
-        self.lbl_right_volt = tk.Label(rp, text="0.000 V", bg=BG_COLOR, fg=FG_COLOR,
-                                        font=("Consolas", 11))
-        self.lbl_right_volt.pack()
-        self.lbl_right_dist = tk.Label(rp, text="-- cm", bg=BG_COLOR, fg=ACCENT_U,
-                                        font=("Consolas", 18, "bold"))
-        self.lbl_right_dist.pack(pady=(3, 0))
-        self.right_gauge = tk.Canvas(rp, height=14, bg=CHART_BG, highlightthickness=0)
-        self.right_gauge.pack(fill=tk.X, padx=12, pady=(6, 0))
-
-    # ════════════════════════════════════════════════════════════════════════
-    # Chart
-    # ════════════════════════════════════════════════════════════════════════
     def _setup_chart(self):
-        self.ax.set_facecolor(CHART_BG)
-        self.ax.set_xlim(0, HISTORY_SIZE)
-        self.ax.set_ylim(0, 200)
-        self.ax.set_ylabel("Distance (cm)", color=FG_COLOR, fontsize=9)
-        self.ax.set_xlabel("Samples", color=FG_COLOR, fontsize=9)
-        self.ax.tick_params(colors=FG_COLOR, labelsize=8)
-        self.ax.grid(True, color=GRID_COLOR, alpha=0.5, linestyle="--")
-        for spine in self.ax.spines.values():
-            spine.set_color(GRID_COLOR)
+        ax = self.ax_chart
+        ax.set_facecolor(CHART_BG)
+        ax.set_xlim(0, HISTORY_SIZE)
+        ax.set_ylim(0, 150)
+        ax.set_ylabel("cm", color=FG_DIM, fontsize=8)
+        ax.tick_params(colors=FG_DIM, labelsize=7)
+        ax.grid(True, color=GRID_CLR, alpha=0.5, linestyle="--")
+        for s in ax.spines.values(): s.set_color(GRID_CLR)
 
-        self.ax.axhspan(0, 20, alpha=0.08, color=DANGER_COLOR)
-        self.ax.axhline(y=20, color=DANGER_COLOR, alpha=0.3, linestyle="--", linewidth=1)
+        ax.axhspan(0, 20, alpha=0.06, color=DANGER)
+        ax.axhline(y=20, color=DANGER, alpha=0.25, linestyle="--", linewidth=0.8)
 
-        self.line_left, = self.ax.plot([], [], color=ACCENT_L, linewidth=1.5,
-                                        label="IR Left", alpha=0.9)
-        self.line_right, = self.ax.plot([], [], color=ACCENT_R, linewidth=1.5,
-                                         label="IR Right", alpha=0.9)
-        self.line_us, = self.ax.plot([], [], color=ACCENT_U, linewidth=2.5,
-                                      label="Ultrasonic", alpha=0.9)
-        self.ax.legend(loc="upper right", facecolor=CHART_BG, edgecolor=GRID_COLOR,
-                       labelcolor=FG_COLOR, fontsize=8)
-        self.fig.tight_layout(pad=2)
+        self.ln_l, = ax.plot([], [], color=ACCENT_L, lw=1.2, label="IR L", alpha=0.85)
+        self.ln_r, = ax.plot([], [], color=ACCENT_R, lw=1.2, label="IR R", alpha=0.85)
+        self.ln_u, = ax.plot([], [], color=ACCENT_U, lw=2.0, label="US", alpha=0.9)
+        ax.legend(loc="upper right", facecolor=CHART_BG, edgecolor=GRID_CLR,
+                  labelcolor=FG_DIM, fontsize=7)
+        self.fig_chart.tight_layout(pad=1.5)
 
+    # ════════════════════════════════════════════════════════════════
+    # Animation
+    # ════════════════════════════════════════════════════════════════
     def _start_animation(self):
-        self.ani = animation.FuncAnimation(self.fig, self._update_chart,
+        self.ani = animation.FuncAnimation(self.fig_chart, self._update_all,
                                            interval=100, blit=False,
                                            cache_frame_data=False)
 
-    def _update_chart(self, frame):
-        left_v = adc_to_voltage(self.ir_left)
-        right_v = adc_to_voltage(self.ir_right)
-        left_dist = voltage_to_distance_cm(left_v)
-        right_dist = voltage_to_distance_cm(right_v)
-        us_dist = float(self.us_dist)
+    def _update_all(self, frame):
+        # Sensor distances
+        lv = adc_to_voltage(self.ir_left)
+        rv = adc_to_voltage(self.ir_right)
+        ld = voltage_to_distance_cm(lv)
+        rd = voltage_to_distance_cm(rv)
+        ud = float(self.us_dist)
 
-        self.left_history.append(left_dist)
-        self.right_history.append(right_dist)
-        self.us_history.append(us_dist)
+        self.left_hist.append(ld)
+        self.right_hist.append(rd)
+        self.us_hist.append(ud)
 
         x = list(range(HISTORY_SIZE))
-        self.line_left.set_data(x, list(self.left_history))
-        self.line_right.set_data(x, list(self.right_history))
-        self.line_us.set_data(x, list(self.us_history))
+        self.ln_l.set_data(x, list(self.left_hist))
+        self.ln_r.set_data(x, list(self.right_hist))
+        self.ln_u.set_data(x, list(self.us_hist))
 
-        # Update labels
-        self.lbl_left_adc.configure(text=str(self.ir_left))
-        self.lbl_left_volt.configure(text=f"{left_v:.3f} V")
-        self.lbl_left_dist.configure(text=f"{left_dist:.1f} cm")
-        self._draw_gauge(self.left_gauge, left_dist, 80, ACCENT_L)
+        # Update sensor labels
+        self._lbl_ir_l.configure(text=str(self.ir_left))
+        self._lbl_ir_l_cm.configure(text=f"{ld:.0f} cm")
+        self._lbl_ir_r.configure(text=str(self.ir_right))
+        self._lbl_ir_r_cm.configure(text=f"{rd:.0f} cm")
 
-        self.lbl_right_adc.configure(text=str(self.ir_right))
-        self.lbl_right_volt.configure(text=f"{right_v:.3f} V")
-        self.lbl_right_dist.configure(text=f"{right_dist:.1f} cm")
-        self._draw_gauge(self.right_gauge, right_dist, 80, ACCENT_R)
+        us_color = DANGER if ud < 20 else (WARN if ud < 50 else ACCENT_U)
+        self._lbl_us.configure(text=f"{ud:.0f} cm", fg=us_color)
+        self._draw_bar(self._us_bar, ud, 200, ACCENT_U)
 
-        self._draw_car(left_dist, right_dist, us_dist)
+        # Update attitude labels
+        self._lbl_roll.configure(text=f"{self.roll:+07.1f}")
+        self._lbl_pitch.configure(text=f"{self.pitch:+07.1f}")
+        self._lbl_yaw.configure(text=f"{self.yaw:+07.1f}")
 
-        self._rx_var.set(f"RX: {self.rx_count}")
+        # 3D view
+        self._draw_3d()
 
-        self.canvas.draw_idle()
-        return [self.line_left, self.line_right, self.line_us]
+        # Top-view car
+        self._draw_car_top(ld, rd, ud)
 
-    def _draw_gauge(self, canvas, dist, max_dist, color):
+        # RX counter
+        self._rx_var.set(f"RX:{self.rx_count}")
+
+        self.canvas_chart.draw_idle()
+        return [self.ln_l, self.ln_r, self.ln_u]
+
+    def _draw_bar(self, canvas, val, max_val, color):
         canvas.delete("all")
         w = canvas.winfo_width()
         h = canvas.winfo_height()
-        if w <= 1:
-            return
-        ratio = min(dist / max_dist, 1.0)
-        bar_w = int(w * ratio)
-        bar_color = DANGER_COLOR if dist < 20 else (WARN_COLOR if dist < 40 else color)
-        canvas.create_rectangle(0, 0, w, h, fill=GRID_COLOR, outline="")
-        if bar_w > 0:
-            canvas.create_rectangle(0, 0, bar_w, h, fill=bar_color, outline="")
+        if w <= 1: return
+        ratio = min(val / max_val, 1.0)
+        bw = int(w * ratio)
+        bc = DANGER if val < 20 else (WARN if val < 50 else color)
+        canvas.create_rectangle(0,0,w,h, fill="#0a0a14", outline="")
+        if bw > 0:
+            canvas.create_rectangle(0,0,bw,h, fill=bc, outline="")
 
-    def _draw_car(self, left_dist, right_dist, us_dist):
-        c = self.car_canvas
+    def _draw_speed_bar(self):
+        c = self._speed_bar
         c.delete("all")
         w = c.winfo_width()
         h = c.winfo_height()
-        if w <= 1:
-            return
+        if w <= 1: return
+        ratio = self.speed / 9.0
+        bw = int(w * ratio)
+        c.create_rectangle(0,0,w,h, fill="#0a0a14", outline="")
+        if bw > 0:
+            c.create_rectangle(0,0,bw,h, fill=ACCENT, outline="")
 
-        cx, cy = w // 2, h // 2 + 25
-        car_w, car_h = 80, 120
+    def _draw_3d(self):
+        ax = self.ax3d
+        ax.cla()
+        ax.set_facecolor('#0a0a14')
+
+        R = rotation_matrix(self.roll, self.pitch, self.yaw)
 
         # Car body
-        c.create_rectangle(cx - car_w // 2, cy - car_h // 2,
-                           cx + car_w // 2, cy + car_h // 2,
-                           fill="#45475a", outline="#585b70", width=2)
-        c.create_text(cx, cy + 8, text="TC237", fill=FG_COLOR,
-                      font=("Consolas", 11, "bold"))
+        rotated = (R @ CAR_BODY.T).T
+        faces = [[rotated[v] for v in f] for f in CAR_FACES]
+        poly = Poly3DCollection(faces, facecolors=CAR_COLORS,
+                                edgecolors="#ffffff40", linewidths=0.8)
+        ax.add_collection3d(poly)
 
         # Wheels
-        for dy in [-40, 40]:
-            c.create_rectangle(cx - car_w // 2 - 8, cy + dy - 12,
-                               cx - car_w // 2, cy + dy + 12,
-                               fill="#6c7086", outline="")
-            c.create_rectangle(cx + car_w // 2, cy + dy - 12,
-                               cx + car_w // 2 + 8, cy + dy + 12,
-                               fill="#6c7086", outline="")
+        for wh in WHEELS:
+            rw = (R @ wh.T).T
+            wf = [[rw[v] for v in f] for f in CAR_FACES]
+            wp = Poly3DCollection(wf, facecolors=[(0.2,0.2,0.2,0.9)]*6,
+                                  edgecolors="#333333", linewidths=0.5)
+            ax.add_collection3d(wp)
+
+        # Nose arrow
+        nose = R @ np.array([0, 2.8, 0])
+        ax.quiver(0,0,0, nose[0],nose[1],nose[2], color=ACCENT,
+                  arrow_length_ratio=0.15, linewidth=2.5)
+
+        # Reference axes (subtle)
+        al = 3.0
+        ax.quiver(0,0,0, al,0,0, color="#ff444444", arrow_length_ratio=0.08, linewidth=0.8)
+        ax.quiver(0,0,0, 0,al,0, color="#44ff4444", arrow_length_ratio=0.08, linewidth=0.8)
+        ax.quiver(0,0,0, 0,0,al, color="#4444ff44", arrow_length_ratio=0.08, linewidth=0.8)
+
+        # Grid plane (subtle)
+        grid_pts = np.linspace(-3, 3, 7)
+        for g in grid_pts:
+            ax.plot([g,g],[-3,3],[-3], color=GRID_CLR, linewidth=0.3, alpha=0.3)
+            ax.plot([-3,3],[g,g],[-3], color=GRID_CLR, linewidth=0.3, alpha=0.3)
+
+        lim = 3.5
+        ax.set_xlim([-lim,lim]); ax.set_ylim([-lim,lim]); ax.set_zlim([-lim,lim])
+        ax.set_box_aspect([1,1,1])
+        ax.set_axis_off()
+
+        self.canvas3d.draw_idle()
+
+    def _draw_car_top(self, ld, rd, ud):
+        c = self.car_top
+        c.delete("all")
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w <= 1: return
+
+        cx, cy = w//2, h//2 + 15
+        cw, ch = 50, 75
+
+        # Car body
+        c.create_rectangle(cx-cw//2, cy-ch//2, cx+cw//2, cy+ch//2,
+                           fill="#1a1a30", outline="#2a2a50", width=1)
+        c.create_text(cx, cy+5, text="TC237", fill=FG_DIM, font=("Consolas",8))
+
+        # Wheels
+        for dy in [-28, 28]:
+            c.create_rectangle(cx-cw//2-5, cy+dy-8, cx-cw//2, cy+dy+8,
+                               fill="#333355", outline="")
+            c.create_rectangle(cx+cw//2, cy+dy-8, cx+cw//2+5, cy+dy+8,
+                               fill="#333355", outline="")
 
         # Ultrasonic cone
-        us_len = max(20, min(90, us_dist * 0.8))
-        us_color = DANGER_COLOR if us_dist < 20 else (WARN_COLOR if us_dist < 50 else ACCENT_U)
-        front_y = cy - car_h // 2
-        cone_w = 45
-
-        c.create_polygon(cx - 18, front_y, cx + 18, front_y,
-                         cx + cone_w, front_y - us_len,
-                         cx - cone_w, front_y - us_len,
-                         fill="", outline=us_color, width=2)
-        for i in range(3):
-            off = i * us_len // 4
-            c.create_line(cx - 18 - off // 2, front_y - off,
-                          cx + 18 + off // 2, front_y - off,
-                          fill=us_color, width=1, dash=(4, 4))
-
-        c.create_rectangle(cx - 20, front_y - 5, cx + 20, front_y + 3,
-                           fill="#585b70", outline=us_color, width=1)
-        c.create_text(cx, front_y - us_len - 15,
-                      text=f"{us_dist:.0f} cm", fill=us_color,
-                      font=("Consolas", 14, "bold"))
-        c.create_text(cx, front_y - us_len - 32,
-                      text="ULTRASONIC", fill=us_color, font=("Segoe UI", 8))
+        front_y = cy - ch//2
+        us_len = max(12, min(60, ud * 0.5))
+        uc = DANGER if ud < 20 else (WARN if ud < 50 else ACCENT_U)
+        c.create_polygon(cx-12, front_y, cx+12, front_y,
+                         cx+30, front_y-us_len, cx-30, front_y-us_len,
+                         fill="", outline=uc, width=1)
+        c.create_text(cx, front_y-us_len-10, text=f"{ud:.0f}cm",
+                      fill=uc, font=("Consolas",10,"bold"))
 
         # IR beams
-        ir_angle = math.radians(45)
-        spread = 13
+        angle = math.radians(45)
+        sp = 10
 
-        left_len = max(15, min(80, left_dist))
-        lc = DANGER_COLOR if left_dist < 20 else (WARN_COLOR if left_dist < 40 else ACCENT_L)
-        lx0, ly0 = cx - car_w // 2, front_y
-        lx1 = lx0 - left_len * math.sin(ir_angle)
-        ly1 = ly0 - left_len * math.cos(ir_angle)
-        c.create_line(lx0, ly0, lx1 - spread * 0.3, ly1 - spread * 0.3,
-                      fill=lc, width=2, arrow=tk.LAST)
-        c.create_line(lx0, ly0, lx1 + spread * 0.5, ly1 - spread * 0.5,
-                      fill=lc, width=2, arrow=tk.LAST)
-        c.create_text(lx1 - 5, ly1 - 18, text=f"{left_dist:.0f}cm",
-                      fill=lc, font=("Consolas", 11, "bold"))
+        ll = max(10, min(55, ld * 0.7))
+        lc = DANGER if ld < 20 else (WARN if ld < 40 else ACCENT_L)
+        lx0, ly0 = cx-cw//2, front_y
+        lx1 = lx0 - ll*math.sin(angle)
+        ly1 = ly0 - ll*math.cos(angle)
+        c.create_line(lx0,ly0, lx1-sp*0.3,ly1-sp*0.3, fill=lc, width=1, arrow=tk.LAST)
+        c.create_line(lx0,ly0, lx1+sp*0.4,ly1-sp*0.4, fill=lc, width=1, arrow=tk.LAST)
+        c.create_text(lx1-3, ly1-12, text=f"{ld:.0f}", fill=lc, font=("Consolas",9,"bold"))
 
-        right_len = max(15, min(80, right_dist))
-        rc = DANGER_COLOR if right_dist < 20 else (WARN_COLOR if right_dist < 40 else ACCENT_R)
-        rx0, ry0 = cx + car_w // 2, front_y
-        rx1 = rx0 + right_len * math.sin(ir_angle)
-        ry1 = ry0 - right_len * math.cos(ir_angle)
-        c.create_line(rx0, ry0, rx1 + spread * 0.3, ry1 - spread * 0.3,
-                      fill=rc, width=2, arrow=tk.LAST)
-        c.create_line(rx0, ry0, rx1 - spread * 0.5, ry1 - spread * 0.5,
-                      fill=rc, width=2, arrow=tk.LAST)
-        c.create_text(rx1 + 5, ry1 - 18, text=f"{right_dist:.0f}cm",
-                      fill=rc, font=("Consolas", 11, "bold"))
+        rl = max(10, min(55, rd * 0.7))
+        rc = DANGER if rd < 20 else (WARN if rd < 40 else ACCENT_R)
+        rx0, ry0 = cx+cw//2, front_y
+        rx1 = rx0 + rl*math.sin(angle)
+        ry1 = ry0 - rl*math.cos(angle)
+        c.create_line(rx0,ry0, rx1+sp*0.3,ry1-sp*0.3, fill=rc, width=1, arrow=tk.LAST)
+        c.create_line(rx0,ry0, rx1-sp*0.4,ry1-sp*0.4, fill=rc, width=1, arrow=tk.LAST)
+        c.create_text(rx1+3, ry1-12, text=f"{rd:.0f}", fill=rc, font=("Consolas",9,"bold"))
 
-        c.create_text(cx, cy - car_h // 2 - 8, text="FRONT",
-                      fill="#6c7086", font=("Segoe UI", 8))
-
-    # ════════════════════════════════════════════════════════════════════════
-    # Key Bindings (Controller)
-    # ════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
+    # Keys
+    # ════════════════════════════════════════════════════════════════
     def _bind_keys(self):
-        self.root.bind('<KeyPress-Up>',    lambda e: self._key_press('Up'))
-        self.root.bind('<KeyPress-Down>',  lambda e: self._key_press('Down'))
-        self.root.bind('<KeyPress-Left>',  lambda e: self._key_press('Left'))
-        self.root.bind('<KeyPress-Right>', lambda e: self._key_press('Right'))
-        self.root.bind('<KeyRelease-Up>',    lambda e: self._key_release('Up'))
-        self.root.bind('<KeyRelease-Down>',  lambda e: self._key_release('Down'))
-        self.root.bind('<KeyRelease-Left>',  lambda e: self._key_release('Left'))
-        self.root.bind('<KeyRelease-Right>', lambda e: self._key_release('Right'))
-        for i in range(1, 10):
+        for k in ['Up','Down','Left','Right']:
+            self.root.bind(f'<KeyPress-{k}>', lambda e, d=k: self._key_press(d))
+            self.root.bind(f'<KeyRelease-{k}>', lambda e, d=k: self._key_release(d))
+        for i in range(1,10):
             self.root.bind(str(i), lambda e, n=i: self._set_speed(n))
         self.root.bind('<Escape>', lambda e: self.on_close())
 
-    def _key_press(self, direction):
-        if not self.connected:
-            return
-        if self.active_key == direction:
-            return
-        self.active_key = direction
-        self._update_dpad(direction)
-        self._lbl_cmd.configure(text=CMD_NAME.get(direction, "?"), fg=PHOS)
+    def _key_press(self, d):
+        if not self.connected or self.active_key == d: return
+        self.active_key = d
+        self._update_dpad(d)
+        self._lbl_cmd.configure(text=CMD_NAME.get(d,"?"), fg=ACCENT)
         if not self.sending:
             self.sending = True
             threading.Thread(target=self._send_loop, daemon=True).start()
 
-    def _key_release(self, direction):
-        if self.active_key == direction:
+    def _key_release(self, d):
+        if self.active_key == d:
             self.active_key = None
             self.sending = False
             self._update_dpad(None)
-            self._lbl_cmd.configure(text="STOP", fg=TEXT_DIM)
+            self._lbl_cmd.configure(text="STANDBY", fg=FG_DIM)
 
     def _send_loop(self):
         while self.sending and self.connected:
-            key = self.active_key
-            if key and key in ARROW_MAP:
-                try:
-                    self.ser.write(ARROW_MAP[key])
-                except Exception:
-                    break
-            else:
-                break
+            k = self.active_key
+            if k and k in ARROW_MAP:
+                try: self.ser.write(ARROW_MAP[k])
+                except: break
+            else: break
             time.sleep(SEND_INTERVAL)
         self.sending = False
 
-    def _update_dpad(self, active_dir):
+    def _update_dpad(self, active):
         for d, btn in self._dpad_btns.items():
-            if d == active_dir:
-                btn.configure(bg=PHOS, fg=PANEL_BG)
+            if d == active:
+                btn.configure(bg=ACCENT, fg=BG)
             else:
-                btn.configure(bg="#162035", fg=FG_COLOR)
+                btn.configure(bg="#1a1a30", fg=FG)
 
     def _set_speed(self, n):
-        if n < 1: n = 1
-        if n > 9: n = 9
+        n = max(1, min(9, n))
         self.speed = n
         for i, btn in self._speed_btns.items():
-            if i == n:
-                btn.configure(bg=PHOS, fg=PANEL_BG)
-            else:
-                btn.configure(bg="#162035", fg=FG_COLOR)
-        self._lbl_speed.configure(text=f"{n * 10}%")
+            btn.configure(bg=ACCENT if i==n else "#1a1a30",
+                          fg=BG if i==n else FG_DIM)
+        self._lbl_speed.configure(text=f"{n*10}%")
+        self._draw_speed_bar()
         if self.connected:
-            try:
-                self.ser.write(str(n).encode())
-            except Exception:
-                pass
+            try: self.ser.write(str(n).encode())
+            except: pass
 
-    # ════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
     # Serial
-    # ════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
     def _refresh_ports(self):
         ports = serial.tools.list_ports.comports()
         names = [p.device for p in ports]
@@ -569,37 +646,31 @@ class RcPanel:
         if names:
             for i, p in enumerate(ports):
                 if any(k in p.description for k in USB_KW):
-                    self._combo.current(i)
-                    return
+                    self._combo.current(i); return
             self._combo.current(0)
 
     def _toggle_connect(self):
-        if self.connected:
-            self._disconnect()
-        else:
-            self._connect()
+        if self.connected: self._disconnect()
+        else: self._connect()
 
     def _connect(self):
         port = self._combo.get().strip()
         if not port:
-            messagebox.showwarning("Warning", "COM port to select.")
-            return
+            messagebox.showwarning("Warning", "Select COM port"); return
         baud = int(self._baud_combo.get())
         try:
             self.ser = serial.Serial(port, baud, timeout=1)
         except Exception as e:
-            messagebox.showerror("Error", f"Cannot open {port}\n{e}")
-            return
+            messagebox.showerror("Error", f"Cannot open {port}\n{e}"); return
 
         self.connected = True
         self.rx_count = 0
-        self._btn_conn.configure(text="Disconnect", fg=DANGER_COLOR)
-        self._status_var.set(f"{port} @ {baud}")
-        self._led_cv.itemconfigure(self._led, fill=PHOS)
+        self._btn_conn.configure(text="DISCONNECT", fg=DANGER)
+        self._status_var.set(f"{port}@{baud}")
+        self._led_cv.itemconfigure(self._led, fill=ACCENT)
         self._combo.configure(state="disabled")
         self._baud_combo.configure(state="disabled")
         self.root.focus_set()
-
         threading.Thread(target=self._read_serial, daemon=True).start()
 
     def _disconnect(self):
@@ -607,65 +678,66 @@ class RcPanel:
         self.sending = False
         self.active_key = None
         if self.ser:
-            try:
-                self.ser.close()
-            except Exception:
-                pass
+            try: self.ser.close()
+            except: pass
             self.ser = None
-        self._btn_conn.configure(text="Connect", fg=FG_COLOR)
-        self._status_var.set("Disconnected")
-        self._led_cv.itemconfigure(self._led, fill=TEXT_DIM)
+        self._btn_conn.configure(text="CONNECT", fg=ACCENT)
+        self._status_var.set("OFFLINE")
+        self._led_cv.itemconfigure(self._led, fill=FG_DIM)
         self._combo.configure(state="readonly")
         self._baud_combo.configure(state="readonly")
         self._update_dpad(None)
-        self._lbl_cmd.configure(text="STOP", fg=TEXT_DIM)
+        self._lbl_cmd.configure(text="STANDBY", fg=FG_DIM)
 
     def _read_serial(self):
-        buffer = ""
+        buf = ""
         while self.connected and self.ser and self.ser.is_open:
             try:
                 raw = self.ser.read(self.ser.in_waiting or 1)
-                if not raw:
-                    continue
-                buffer += raw.decode("ascii", errors="ignore")
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
+                if not raw: continue
+                buf += raw.decode("ascii", errors="ignore")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
                     line = line.strip()
+                    # Sensor data: "L:xxxx,R:xxxx,U:xxx"
                     if line.startswith("L:") and ",R:" in line and ",U:" in line:
                         try:
-                            parts = line.split(",")
-                            self.ir_left = int(parts[0][2:])
-                            self.ir_right = int(parts[1][2:])
-                            self.us_dist = int(parts[2][2:])
+                            p = line.split(",")
+                            self.ir_left = int(p[0][2:])
+                            self.ir_right = int(p[1][2:])
+                            self.us_dist = int(p[2][2:])
                             self.rx_count += 1
-                        except (ValueError, IndexError):
-                            pass
-            except Exception:
-                break
+                        except: pass
+                    # IMU data: "R:+xxx.x,P:+xxx.x,Y:+xxx.x"
+                    elif line.startswith("R:") and ",P:" in line and ",Y:" in line:
+                        try:
+                            p = line.split(",")
+                            self.roll = float(p[0][2:])
+                            self.pitch = float(p[1][2:])
+                            self.yaw = float(p[2][2:])
+                            self.rx_count += 1
+                        except: pass
+            except: break
 
         self.connected = False
         try:
-            self.root.after(0, lambda: self._status_var.set("Disconnected"))
-            self.root.after(0, lambda: self._btn_conn.configure(text="Connect", fg=FG_COLOR))
-            self.root.after(0, lambda: self._led_cv.itemconfigure(self._led, fill=TEXT_DIM))
-        except tk.TclError:
-            pass
+            self.root.after(0, lambda: self._status_var.set("OFFLINE"))
+            self.root.after(0, lambda: self._btn_conn.configure(text="CONNECT", fg=ACCENT))
+            self.root.after(0, lambda: self._led_cv.itemconfigure(self._led, fill=FG_DIM))
+        except tk.TclError: pass
 
-    # ════════════════════════════════════════════════════════════════════════
     def on_close(self):
         self.connected = False
         self.sending = False
-        if self.ser and self.ser.is_open:
-            self.ser.close()
+        if self.ser and self.ser.is_open: self.ser.close()
         self.root.destroy()
 
 
 def main():
     root = tk.Tk()
-    app = RcPanel(root)
+    app = RcDashboard(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
-
 
 if __name__ == "__main__":
     main()

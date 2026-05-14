@@ -24,6 +24,7 @@
 #include "DrvUart1.h"
 #include "DrvAdc.h"
 #include "DrvUltrasonic.h"
+#include "DrvMpu9250.h"
 #include "DrvGtmTimer.h"
 #include "AppVehicle.h"
 
@@ -141,6 +142,9 @@ void AppTask_10ms(void)
     }
 
     AppVehicle_Update();
+
+    /* IMU: read sensors + update attitude (100Hz) */
+    DrvMpu9250_ReadSensors();
 }
 
 /******************************************************************************/
@@ -199,4 +203,7 @@ void AppTask_100ms(void)
         DrvUart_SendString(str);
         DrvUart_SendString("\r\n");
     }
+
+    /* Send IMU attitude data */
+    DrvMpu9250_SendUart();
 }

@@ -16,6 +16,8 @@
 #include "DrvUart1.h"
 #include "DrvAdc.h"
 #include "DrvUltrasonic.h"
+#include "DrvSpi.h"
+#include "DrvMpu9250.h"
 #include "AppVehicle.h"
 #include "Scheduler.h"
 
@@ -33,11 +35,15 @@ void core0_main(void)
     DrvUart1_Init();        /* ASCLIN1 9600 (HC-10 BLE) */
     DrvAdc_Init();          /* VADC IR sensors (AN1, AN12) */
     DrvUltrasonic_Init();   /* HC-SR04 (Trig=P02.6 GPIO, Echo=P02.7 TIM0_7) */
+    DrvSpi_Init();          /* QSPI3 SPI Master (MPU-9250) */
 
     AppVehicle_Init();
 
-    /* 글로벌 인터럽트 Enable */
+    /* 글로벌 인터럽트 Enable (SPI ISR 필요) */
     IfxCpu_enableInterrupts();
+
+    /* MPU-9250 초기화: SPI ISR이 필요하므로 인터럽트 활성화 후 수행 */
+    DrvMpu9250_Init();
 
     DrvUart_SendString("=== AI RC Vehicle Ready ===\r\n");
     DrvUart1_SendString("=== AI RC Vehicle Ready (BLE) ===\r\n");
