@@ -18,6 +18,7 @@ Usage:
 
 import math
 import time
+import asyncio
 import threading
 from collections import deque
 
@@ -38,6 +39,12 @@ try:
 except ImportError:
     print("pyserial required: pip install pyserial")
     import sys; sys.exit(1)
+
+try:
+    from bleak import BleakClient, BleakScanner
+    BLEAK_OK = True
+except ImportError:
+    BLEAK_OK = False
 
 # ── Configuration ────────────────────────────────────────────────────────────
 DEFAULT_BAUD   = 38400
@@ -82,6 +89,10 @@ CMD_NAME = {
 NACK_NAMES = {0x01: "BAD_CHK", 0x02: "BAD_LEN", 0x03: "UNK_CMD"}
 
 USB_KW = ("PL2303", "Prolific", "CH340", "FTDI", "Silicon", "CP210", "USB Serial")
+
+# ── BLE (HM-10) ───────────────────────────────────────────────────────────────
+HM10_CHAR_UUID  = "0000ffe1-0000-1000-8000-00805f9b34fb"
+HM10_NAME_HINTS = ("HMSoft", "HM-10", "HM10", "BT05", "MLT-BT05", "CC41")
 
 # ── Color Palette ────────────────────────────────────────────────────────────
 BG        = "#0a0a12"
@@ -156,19 +167,28 @@ class RcDashboard:
         self.root.geometry("1400x920")
         self.root.minsize(1200, 800)
 
-        self.ser       = None
-        self.connected = False
+        self.ser        = None
+        self.connected  = False
         self.active_key = None
-        self.speed     = 5
-        self.sending   = False
+        self.speed      = 5
+        self.sending    = False
+
+        # BLE
+        self.ble_mode      = False
+        self.ble_client    = None
+        self._ble_devices  = {}          # name → address
+        self._rx_buf       = bytearray() # shared RX buffer (serial + BLE)
+        self._ble_loop     = asyncio.new_event_loop()
+        threading.Thread(target=self._ble_loop.run_forever,
+                         daemon=True, name="ble-loop").start()
 
         self.ir_left  = 0; self.ir_right = 0; self.us_dist = 0
         self.roll = 0.0;   self.pitch = 0.0;  self.yaw = 0.0
         self.rx_count = 0
 
-        self.left_hist = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
+        self.left_hist  = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
         self.right_hist = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
-        self.us_hist   = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
+        self.us_hist    = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
 
         self._build_ui()
         self._bind_keys()
@@ -205,6 +225,15 @@ class RcDashboard:
                                     command=self._toggle_connect)
         self._btn_conn.pack(side=tk.RIGHT, padx=16)
 
+        # ── BLE mode toggle ──────────────────────────────────────────
+        self._btn_ble = tk.Button(bar, text="BLE", width=4,
+                                   bg="#1a1a2a", fg=FG_DIM, relief=tk.FLAT,
+                                   font=("Consolas", 9, "bold"), cursor="hand2",
+                                   activebackground="#2a2040",
+                                   command=self._toggle_ble_mode)
+        self._btn_ble.pack(side=tk.RIGHT, padx=(0,2))
+
+        # ── Serial widgets ───────────────────────────────────────────
         self._baud_combo = ttk.Combobox(bar, width=7, state="readonly", font=("Consolas", 9))
         self._baud_combo["values"] = ["9600","19200","38400","57600","115200"]
         self._baud_combo.set("38400")
@@ -213,9 +242,17 @@ class RcDashboard:
         self._combo = ttk.Combobox(bar, width=10, state="readonly", font=("Consolas", 9))
         self._combo.pack(side=tk.RIGHT, padx=4)
 
-        tk.Button(bar, text="SCAN", width=5, bg="#1a2040", fg=FG_DIM, relief=tk.FLAT,
-                  font=("Consolas", 9), cursor="hand2",
-                  command=self._refresh_ports).pack(side=tk.RIGHT, padx=4)
+        self._btn_scan = tk.Button(bar, text="SCAN", width=5, bg="#1a2040", fg=FG_DIM,
+                                    relief=tk.FLAT, font=("Consolas", 9), cursor="hand2",
+                                    command=self._refresh_ports)
+        self._btn_scan.pack(side=tk.RIGHT, padx=4)
+
+        # ── BLE widgets (hidden until BLE mode) ──────────────────────
+        self._ble_combo = ttk.Combobox(bar, width=14, state="readonly", font=("Consolas", 9))
+        self._btn_ble_scan = tk.Button(bar, text="SCAN BLE", width=8,
+                                        bg="#1a1040", fg=ACCENT2, relief=tk.FLAT,
+                                        font=("Consolas", 9), cursor="hand2",
+                                        command=self._ble_scan)
 
         self._led_cv = tk.Canvas(bar, width=12, height=12, bg="#06060e", highlightthickness=0)
         self._led_cv.pack(side=tk.RIGHT, padx=(10,4))
@@ -662,8 +699,14 @@ class RcDashboard:
         self._write_packet(build_packet(CMD_MODE, bytes([mode_idx])))
 
     def _write_packet(self, pkt):
-        """Send packet; returns False on error."""
-        if not self.connected or not self.ser:
+        """Send packet via serial or BLE. Returns False on error."""
+        if not self.connected:
+            return False
+        if self.ble_mode:
+            asyncio.run_coroutine_threadsafe(
+                self._ble_write_async(bytes(pkt)), self._ble_loop)
+            return True
+        if not self.ser:
             return False
         try:
             self.ser.write(pkt)
@@ -691,6 +734,119 @@ class RcDashboard:
             self._write_packet(build_packet(CMD_MOVE, bytes([DIR_MAP[self.active_key], n * 10])))
 
     # ════════════════════════════════════════════════════════════════
+    # BLE mode
+    # ════════════════════════════════════════════════════════════════
+    def _toggle_ble_mode(self):
+        if not BLEAK_OK:
+            messagebox.showwarning("BLE", "bleak not installed.\npip install bleak"); return
+        if self.connected:
+            messagebox.showwarning("BLE", "Disconnect first."); return
+
+        self.ble_mode = not self.ble_mode
+        if self.ble_mode:
+            self._btn_ble.configure(bg="#1a0a40", fg=ACCENT2)
+            # hide serial widgets, show BLE widgets
+            self._btn_scan.pack_forget()
+            self._combo.pack_forget()
+            self._baud_combo.pack_forget()
+            self._btn_ble_scan.pack(side=tk.RIGHT, padx=4)
+            self._ble_combo.pack(side=tk.RIGHT, padx=4)
+        else:
+            self._btn_ble.configure(bg="#1a1a2a", fg=FG_DIM)
+            # hide BLE widgets, restore serial widgets
+            self._btn_ble_scan.pack_forget()
+            self._ble_combo.pack_forget()
+            self._baud_combo.pack(side=tk.RIGHT, padx=4)
+            self._combo.pack(side=tk.RIGHT, padx=4)
+            self._btn_scan.pack(side=tk.RIGHT, padx=4)
+
+    def _ble_scan(self):
+        self._ble_combo["values"] = ["Scanning..."]
+        self._ble_combo.set("Scanning...")
+        self._btn_ble_scan.configure(state="disabled")
+        asyncio.run_coroutine_threadsafe(self._ble_scan_async(), self._ble_loop)
+
+    async def _ble_scan_async(self):
+        found = {}
+
+        def _cb(device, adv):
+            # advertisement_data gives more reliable name on Windows
+            name = (adv.local_name or device.name or "").strip()
+            uuids = " ".join(adv.service_uuids or []).lower()
+            is_hm10 = (any(h.lower() in name.lower() for h in HM10_NAME_HINTS)
+                       or "ffe0" in uuids)
+            tag   = "★ " if is_hm10 else ""
+            label = f"{tag}{name or 'Unknown'} [{device.address}]"
+            found[label] = device.address
+
+        try:
+            scanner = BleakScanner(detection_callback=_cb)
+            await scanner.start()
+            await asyncio.sleep(5.0)
+            await scanner.stop()
+            self._ble_devices = found
+            result = sorted(found.keys(), key=lambda s: (0 if s.startswith("★") else 1))
+            if not result:
+                result = ["No devices found"]
+        except Exception as e:
+            result = [f"Scan error: {e}"]
+        self.root.after(0, lambda: self._ble_scan_done(result))
+
+    def _ble_scan_done(self, result):
+        self._ble_combo["values"] = result
+        self._ble_combo.set(result[0])
+        self._btn_ble_scan.configure(state="normal")
+
+    async def _ble_connect_async(self, address):
+        try:
+            self.ble_client = BleakClient(address)
+            await self.ble_client.connect()
+            await self.ble_client.start_notify(HM10_CHAR_UUID,
+                                                self._ble_notification_handler)
+            self.root.after(0, self._ble_connected_ui)
+        except Exception as e:
+            self.ble_client = None
+            self.root.after(0, lambda: messagebox.showerror("BLE", f"Connect failed:\n{e}"))
+
+    def _ble_connected_ui(self):
+        self.connected = True
+        self.rx_count  = 0
+        self._rx_buf.clear()
+        self._btn_conn.configure(text="DISCONNECT", fg=DANGER)
+        addr = self.ble_client.address if self.ble_client else "?"
+        self._status_var.set(f"BLE {addr[:8]}…")
+        self._led_cv.itemconfigure(self._led, fill=ACCENT2)
+        self._ble_combo.configure(state="disabled")
+        self._btn_ble_scan.configure(state="disabled")
+        self.root.focus_set()
+
+    async def _ble_disconnect_async(self):
+        if self.ble_client:
+            try:
+                await self.ble_client.disconnect()
+            except Exception:
+                pass
+            self.ble_client = None
+
+    def _ble_notification_handler(self, _sender, data: bytearray):
+        """Called from bleak's asyncio thread — feed bytes into shared RX buffer."""
+        self.root.after(0, lambda d=bytes(data): self._process_rx_bytes(d))
+
+    async def _ble_write_async(self, pkt: bytes):
+        if self.ble_client and self.ble_client.is_connected:
+            try:
+                # response=True: Write With Response (HM-10 클론 호환성)
+                await self.ble_client.write_gatt_char(HM10_CHAR_UUID, pkt,
+                                                       response=True)
+            except Exception:
+                try:
+                    # fallback: Write Without Response
+                    await self.ble_client.write_gatt_char(HM10_CHAR_UUID, pkt,
+                                                           response=False)
+                except Exception:
+                    pass
+
+    # ════════════════════════════════════════════════════════════════
     # Serial
     # ════════════════════════════════════════════════════════════════
     def _refresh_ports(self):
@@ -705,9 +861,10 @@ class RcDashboard:
 
     def _toggle_connect(self):
         if self.connected: self._disconnect()
-        else: self._connect()
+        elif self.ble_mode: self._connect_ble()
+        else: self._connect_serial()
 
-    def _connect(self):
+    def _connect_serial(self):
         port = self._combo.get().strip()
         if not port:
             messagebox.showwarning("Warning", "Select COM port"); return
@@ -719,6 +876,7 @@ class RcDashboard:
 
         self.connected = True
         self.rx_count  = 0
+        self._rx_buf.clear()
         self._btn_conn.configure(text="DISCONNECT", fg=DANGER)
         self._status_var.set(f"{port}@{baud}")
         self._led_cv.itemconfigure(self._led, fill=ACCENT)
@@ -727,76 +885,86 @@ class RcDashboard:
         self.root.focus_set()
         threading.Thread(target=self._read_serial, daemon=True).start()
 
+    def _connect_ble(self):
+        sel = self._ble_combo.get().strip()
+        address = self._ble_devices.get(sel)
+        if not address:
+            messagebox.showwarning("BLE", "Scan and select a BLE device first."); return
+        asyncio.run_coroutine_threadsafe(self._ble_connect_async(address), self._ble_loop)
+
     def _disconnect(self):
-        self.connected = False
-        self.sending   = False
+        self.connected  = False
+        self.sending    = False
         self.active_key = None
-        if self.ser:
-            try: self.ser.close()
-            except: pass
-            self.ser = None
+
+        if self.ble_mode:
+            asyncio.run_coroutine_threadsafe(self._ble_disconnect_async(), self._ble_loop)
+            self._ble_combo.configure(state="readonly")
+            self._btn_ble_scan.configure(state="normal")
+        else:
+            if self.ser:
+                try: self.ser.close()
+                except: pass
+                self.ser = None
+            self._combo.configure(state="readonly")
+            self._baud_combo.configure(state="readonly")
+
         self._btn_conn.configure(text="CONNECT", fg=ACCENT)
         self._status_var.set("OFFLINE")
         self._led_cv.itemconfigure(self._led, fill=FG_DIM)
-        self._combo.configure(state="readonly")
-        self._baud_combo.configure(state="readonly")
         self._update_dpad(None)
         self._lbl_cmd.configure(text="STANDBY", fg=FG_DIM)
 
-    # ── RX: mixed binary packet + text line parser ────────────────
+    # ── RX: shared binary+text parser (serial thread & BLE callback) ─
+    def _process_rx_bytes(self, data: bytes):
+        """Feed raw bytes into the shared RX buffer and parse."""
+        self._rx_buf.extend(data)
+        while True:
+            if not self._rx_buf:
+                break
+
+            stx_pos = self._rx_buf.find(b'\xaa')
+            nl_pos  = self._rx_buf.find(b'\n')
+
+            if stx_pos == -1 and nl_pos == -1:
+                if len(self._rx_buf) > 256:
+                    self._rx_buf.clear()
+                break
+
+            # Binary packet first
+            if stx_pos != -1 and (nl_pos == -1 or stx_pos < nl_pos):
+                if stx_pos > 0:
+                    self._rx_buf = self._rx_buf[stx_pos:]
+                    continue
+                if len(self._rx_buf) < 2:
+                    break
+                pkt_len = self._rx_buf[1]
+                if pkt_len == 0 or pkt_len > PROTO_MAX_PKT_LEN:
+                    self._rx_buf = self._rx_buf[1:]
+                    continue
+                total = 1 + 1 + pkt_len + 1 + 1
+                if len(self._rx_buf) < total:
+                    break
+                pkt = bytes(self._rx_buf[:total])
+                self._rx_buf = self._rx_buf[total:]
+                if pkt[-1] == PROTO_ETX:
+                    self._handle_binary_packet(pkt)
+            # Text line
+            elif nl_pos != -1:
+                line = self._rx_buf[:nl_pos].decode('ascii', errors='ignore').strip()
+                self._rx_buf = self._rx_buf[nl_pos + 1:]
+                if line:
+                    self._handle_text_line(line)
+            else:
+                break
+
     def _read_serial(self):
-        rx_buf = bytearray()
+        """Serial RX thread — feeds bytes into shared parser."""
         while self.connected and self.ser and self.ser.is_open:
             try:
                 raw = self.ser.read(self.ser.in_waiting or 1)
-                if not raw:
-                    continue
-                rx_buf.extend(raw)
-
-                while True:
-                    if not rx_buf:
-                        break
-
-                    stx_pos = rx_buf.find(b'\xaa')
-                    nl_pos  = rx_buf.find(b'\n')
-
-                    # Nothing actionable yet
-                    if stx_pos == -1 and nl_pos == -1:
-                        if len(rx_buf) > 256:
-                            rx_buf.clear()
-                        break
-
-                    # Binary packet arrives before (or instead of) text line
-                    if stx_pos != -1 and (nl_pos == -1 or stx_pos < nl_pos):
-                        # Discard junk before STX
-                        if stx_pos > 0:
-                            rx_buf = rx_buf[stx_pos:]
-                            continue
-                        # Need at least STX + LEN
-                        if len(rx_buf) < 2:
-                            break
-                        pkt_len = rx_buf[1]
-                        # Sanity-check LEN before allocating
-                        if pkt_len == 0 or pkt_len > PROTO_MAX_PKT_LEN:
-                            rx_buf = rx_buf[1:]   # skip bad STX
-                            continue
-                        total = 1 + 1 + pkt_len + 1 + 1  # STX LEN [CMD+PLD] CHK ETX
-                        if len(rx_buf) < total:
-                            break   # wait for more bytes
-                        pkt = bytes(rx_buf[:total])
-                        rx_buf = rx_buf[total:]
-                        if pkt[-1] == PROTO_ETX:
-                            self._handle_binary_packet(pkt)
-
-                    # Text line
-                    elif nl_pos != -1:
-                        line = rx_buf[:nl_pos].decode('ascii', errors='ignore').strip()
-                        rx_buf = rx_buf[nl_pos + 1:]
-                        if line:
-                            self._handle_text_line(line)
-                    else:
-                        break
-
+                if raw:
+                    self._process_rx_bytes(raw)
             except Exception:
                 break
 
@@ -856,6 +1024,10 @@ class RcDashboard:
         self.sending   = False
         if self.ser and self.ser.is_open:
             self.ser.close()
+        if self.ble_client:
+            asyncio.run_coroutine_threadsafe(
+                self._ble_disconnect_async(), self._ble_loop)
+        self._ble_loop.call_soon_threadsafe(self._ble_loop.stop)
         self.root.destroy()
 
 

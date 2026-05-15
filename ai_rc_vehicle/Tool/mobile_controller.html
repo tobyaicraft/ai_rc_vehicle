@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>RC Car BLE Controller</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; touch-action: manipulation; }
+  body {
+    background: #0a0a12; color: #e0e0ff;
+    font-family: "Consolas", monospace;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 20px;
+    user-select: none;
+  }
+  h1 { font-size: 18px; color: #7070ff; margin-bottom: 6px; }
+  #status {
+    font-size: 12px; color: #888; margin-bottom: 16px;
+    min-height: 16px; text-align: center;
+  }
+
+  /* Connect bar */
+  .top-bar {
+    display: flex; gap: 10px; margin-bottom: 20px; align-items: center;
+  }
+  button {
+    padding: 10px 20px; border: none; border-radius: 8px;
+    font-family: inherit; font-size: 13px; font-weight: bold;
+    cursor: pointer; transition: background 0.15s;
+  }
+  #btnConnect { background: #2244aa; color: #fff; }
+  #btnConnect.connected { background: #224422; color: #7f7; }
+  #btnConnect:active { opacity: 0.7; }
+  #btnPing { background: #1a1a2a; color: #888; }
+  #btnPing:active { background: #2a2a4a; }
+
+  /* Speed slider */
+  .speed-row {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 24px;
+    width: 100%; max-width: 340px;
+  }
+  .speed-row label { font-size: 12px; color: #888; white-space: nowrap; }
+  input[type=range] { flex: 1; accent-color: #7070ff; }
+  #speedVal { font-size: 14px; color: #fff; width: 28px; text-align: right; }
+
+  /* D-pad */
+  .dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 80px);
+    grid-template-rows: repeat(3, 80px);
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  .dpad-btn {
+    background: #14142a; color: #aaa; font-size: 28px;
+    border-radius: 12px; border: 1px solid #2a2a4a;
+    width: 80px; height: 80px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .dpad-btn:active, .dpad-btn.pressed { background: #2a2a6a; color: #fff; }
+  .dpad-btn.stop { background: #2a1414; font-size: 14px; color: #f77; }
+  .dpad-btn.stop:active { background: #5a1414; }
+  .empty { visibility: hidden; }
+
+  /* ACK display */
+  #ackBox {
+    font-size: 13px; padding: 8px 16px;
+    background: #0e0e1e; border-radius: 8px;
+    border: 1px solid #2a2a4a; min-width: 200px; text-align: center;
+    color: #666;
+  }
+  #ackBox.ack  { color: #4f8; border-color: #246; }
+  #ackBox.nack { color: #f77; border-color: #422; }
+</style>
+</head>
+<body>
+
+<h1>🚗 RC Car BLE Controller</h1>
+<div id="status">연결 전</div>
+
+<div class="top-bar">
+  <button id="btnConnect" onclick="toggleConnect()">CONNECT</button>
+  <button id="btnPing" onclick="sendPing()">PING</button>
+</div>
+
+<div class="speed-row">
+  <label>SPEED</label>
+  <input type="range" id="speedSlider" min="10" max="100" value="50"
+         oninput="document.getElementById('speedVal').textContent=this.value">
+  <span id="speedVal">50</span>
+</div>
+
+<div class="dpad">
+  <div class="empty"></div>
+  <div class="dpad-btn" id="btnFwd"
+       ontouchstart="press('fwd')" ontouchend="release()"
+       onmousedown="press('fwd')"  onmouseup="release()">▲</div>
+  <div class="empty"></div>
+
+  <div class="dpad-btn" id="btnLeft"
+       ontouchstart="press('left')" ontouchend="release()"
+       onmousedown="press('left')"  onmouseup="release()">◀</div>
+  <div class="dpad-btn stop" id="btnStop" onclick="sendStop()">STOP</div>
+  <div class="dpad-btn" id="btnRight"
+       ontouchstart="press('right')" ontouchend="release()"
+       onmousedown="press('right')"  onmouseup="release()">▶</div>
+
+  <div class="empty"></div>
+  <div class="dpad-btn" id="btnRev"
+       ontouchstart="press('rev')" ontouchend="release()"
+       onmousedown="press('rev')"  onmouseup="release()">▼</div>
+  <div class="empty"></div>
+</div>
+
+<div id="ackBox">—</div>
+
+<script>
+// ── BLE constants ──────────────────────────────────────────────────────────
+const SVC_UUID  = "0000ffe0-0000-1000-8000-00805f9b34fb";
+const CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb";
+
+// ── Packet protocol ────────────────────────────────────────────────────────
+const STX=0xAA, ETX=0x55;
+const CMD_MOVE=0x01, CMD_PING=0x10, CMD_ACK=0x80, CMD_NACK=0xE0;
+const DIR_STOP=0, DIR_FWD=1, DIR_REV=2, DIR_LEFT=3, DIR_RIGHT=4;
+
+function buildPacket(cmd, payload=[]) {
+  const len = 1 + payload.length;
+  let chk = cmd;
+  for (const b of payload) chk ^= b;
+  return new Uint8Array([STX, len, cmd, ...payload, chk, ETX]);
+}
+
+// ── State ──────────────────────────────────────────────────────────────────
+let device=null, server=null, char=null;
+let pressTimer=null, currentDir=null;
+let rxBuf = [];
+
+function setStatus(msg, ok=null) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.style.color = ok===true ? '#4f8' : ok===false ? '#f77' : '#888';
+}
+
+function showAck(text, isAck) {
+  const el = document.getElementById('ackBox');
+  el.textContent = text;
+  el.className = isAck ? 'ack' : 'nack';
+  setTimeout(() => { el.textContent='—'; el.className=''; }, 2000);
+}
+
+// ── BLE Connect ────────────────────────────────────────────────────────────
+async function toggleConnect() {
+  if (char) { await disconnect(); return; }
+
+  setStatus('스캔 중...');
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [
+        { services: [SVC_UUID] },
+        { namePrefix: 'HM' },
+        { namePrefix: 'BT' },
+        { namePrefix: 'MLT' },
+      ],
+      optionalServices: [SVC_UUID]
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+
+    setStatus('연결 중...');
+    server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC_UUID);
+    char = await svc.getCharacteristic(CHAR_UUID);
+
+    await char.startNotifications();
+    char.addEventListener('characteristicvaluechanged', onNotify);
+
+    document.getElementById('btnConnect').textContent = 'DISCONNECT';
+    document.getElementById('btnConnect').classList.add('connected');
+    setStatus(`연결됨: ${device.name || device.id}`, true);
+  } catch(e) {
+    setStatus('연결 실패: ' + e.message, false);
+    char = null;
+  }
+}
+
+async function disconnect() {
+  if (server && server.connected) server.disconnect();
+  onDisconnected();
+}
+
+function onDisconnected() {
+  char = null; server = null;
+  document.getElementById('btnConnect').textContent = 'CONNECT';
+  document.getElementById('btnConnect').classList.remove('connected');
+  setStatus('연결 끊김', false);
+  release();
+}
+
+// ── Send ───────────────────────────────────────────────────────────────────
+function getSpeed() {
+  return parseInt(document.getElementById('speedSlider').value);
+}
+
+async function bleWrite(pkt) {
+  if (!char) return;
+  try {
+    await char.writeValueWithResponse(pkt);
+  } catch {
+    try { await char.writeValueWithoutResponse(pkt); } catch {}
+  }
+}
+
+async function sendStop() {
+  await bleWrite(buildPacket(CMD_MOVE, [DIR_STOP, 0]));
+}
+
+async function sendPing() {
+  if (!char) { setStatus('연결 필요', false); return; }
+  await bleWrite(buildPacket(CMD_PING));
+}
+
+// ── D-pad press/release ────────────────────────────────────────────────────
+// PC panel.py 방식과 동일: write 완료 후 다음 전송 예약 (setInterval 금지)
+// setInterval은 이전 BLE write 완료 여부와 무관하게 발사 → 패킷 충돌 → CHK 오류
+
+const DIR_MAP = { fwd: DIR_FWD, rev: DIR_REV, left: DIR_LEFT, right: DIR_RIGHT };
+const BTN_IDS = { fwd:'btnFwd', rev:'btnRev', left:'btnLeft', right:'btnRight' };
+
+function press(dir) {
+  if (currentDir === dir) return;
+  stopLoop();
+  currentDir = dir;
+  document.getElementById(BTN_IDS[dir])?.classList.add('pressed');
+  runSendLoop(dir);
+}
+
+function release() {
+  stopLoop();
+  sendStop();
+}
+
+let _loopActive = false;
+
+function stopLoop() {
+  _loopActive = false;
+  if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+  if (currentDir) {
+    document.getElementById(BTN_IDS[currentDir])?.classList.remove('pressed');
+    currentDir = null;
+  }
+}
+
+async function runSendLoop(dir) {
+  _loopActive = true;
+  while (_loopActive && char) {
+    await bleWrite(buildPacket(CMD_MOVE, [DIR_MAP[dir], getSpeed()]));
+    // write 완료 후 고정 대기 → 다음 전송 (PC asyncio await 방식과 동일)
+    await new Promise(r => { pressTimer = setTimeout(r, 120); });
+  }
+}
+
+// ── RX notification parser ─────────────────────────────────────────────────
+function onNotify(event) {
+  const data = new Uint8Array(event.target.value.buffer);
+  for (const b of data) rxBuf.push(b);
+  parseRx();
+}
+
+function parseRx() {
+  while (rxBuf.length >= 2) {
+    if (rxBuf[0] !== 0xAA) { rxBuf.shift(); continue; }
+    if (rxBuf.length < 4) break;
+    const len = rxBuf[1];
+    const total = 2 + len + 2; // STX + LEN + (len bytes) + CHK + ETX
+    if (rxBuf.length < total) break;
+    const cmd = rxBuf[2];
+    const etx = rxBuf[total-1];
+    if (etx === 0x55) {
+      if (cmd === CMD_ACK) {
+        const origCmd = rxBuf[3] || 0;
+        showAck(`ACK CMD=0x${origCmd.toString(16).padStart(2,'0').toUpperCase()}`, true);
+      } else if (cmd === CMD_NACK) {
+        const errCode = rxBuf[3] || 0;
+        showAck(`NACK ERR=0x${errCode.toString(16).padStart(2,'0').toUpperCase()}`, false);
+      }
+    }
+    rxBuf.splice(0, total);
+  }
+}
+
+// ── keyboard (PC 테스트용) ─────────────────────────────────────────────────
+const keyMap = { w:'fwd', s:'rev', a:'left', d:'right',
+                 W:'fwd', S:'rev', A:'left', D:'right' };
+document.addEventListener('keydown', e => {
+  if (e.repeat) return;
+  if (e.key === ' ') { sendStop(); return; }
+  const d = keyMap[e.key];
+  if (d) press(d);
+});
+document.addEventListener('keyup', e => {
+  const d = keyMap[e.key];
+  if (d && currentDir === d) release();
+});
+</script>
+</body>
+</html>
