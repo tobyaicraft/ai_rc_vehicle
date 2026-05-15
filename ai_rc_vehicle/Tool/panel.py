@@ -3,9 +3,14 @@ RC Car Telemetry Dashboard
 ───────────────────────────
 HC-12 wireless: control(TX) + sensor/IMU monitor(RX)
 
-TX: Arrow ESC sequences (0x1B 5B 41~44), speed '1'~'9'
-RX: "L:xxxx,R:xxxx,U:xxx\r\n"  (IR + Ultrasonic)
-    "R:+xxx.x,P:+xxx.x,Y:+xxx.x\r\n"  (IMU attitude)
+TX: Packet protocol  STX(0xAA) | LEN | CMD | PAYLOAD | CHK | ETX(0x55)
+    CMD_MOVE (0x01): dir(1B) + speed(1B)
+    CMD_MODE (0x02): mode(1B)
+    CMD_PING (0x10): no payload
+
+RX (binary): ACK (0x80) / NACK (0xE0) packets
+RX (text):   "L:xxxx,R:xxxx,U:xxx\\r\\n"  (IR + Ultrasonic)
+             "R:+xxx.x,P:+xxx.x,Y:+xxx.x\\r\\n"  (IMU attitude)
 
 Usage:
     python panel.py
@@ -35,11 +40,48 @@ except ImportError:
     import sys; sys.exit(1)
 
 # ── Configuration ────────────────────────────────────────────────────────────
-DEFAULT_BAUD = 38400
-ADC_MAX = 4095
-VAREF = 5.0
-HISTORY_SIZE = 200
-SEND_INTERVAL = 0.05
+DEFAULT_BAUD   = 38400
+ADC_MAX        = 4095
+VAREF          = 5.0
+HISTORY_SIZE   = 200
+SEND_INTERVAL  = 0.05   # 50ms MOVE repeat interval
+
+# ── Packet Protocol ──────────────────────────────────────────────────────────
+PROTO_STX = 0xAA
+PROTO_ETX = 0x55
+CMD_MOVE  = 0x01
+CMD_MODE  = 0x02
+CMD_PING  = 0x10
+CMD_ACK   = 0x80
+CMD_NACK  = 0xE0
+
+DIR_STOP    = 0
+DIR_FORWARD = 1
+DIR_REVERSE = 2
+DIR_LEFT    = 3
+DIR_RIGHT   = 4
+
+PROTO_MAX_PKT_LEN = 9   # CMD(1) + PAYLOAD(8) max
+
+def build_packet(cmd, payload=b''):
+    """STX LEN CMD [PAYLOAD] CHK ETX"""
+    length = 1 + len(payload)           # LEN = CMD + PAYLOAD bytes
+    chk = cmd
+    for b in payload:
+        chk ^= b
+    return bytes([PROTO_STX, length, cmd] + list(payload) + [chk, PROTO_ETX])
+
+DIR_MAP = {
+    'Up': DIR_FORWARD, 'Down': DIR_REVERSE,
+    'Left': DIR_LEFT,  'Right': DIR_RIGHT,
+}
+CMD_NAME = {
+    'Up': 'FORWARD', 'Down': 'REVERSE',
+    'Left': 'LEFT',  'Right': 'RIGHT',
+}
+NACK_NAMES = {0x01: "BAD_CHK", 0x02: "BAD_LEN", 0x03: "UNK_CMD"}
+
+USB_KW = ("PL2303", "Prolific", "CH340", "FTDI", "Silicon", "CP210", "USB Serial")
 
 # ── Color Palette ────────────────────────────────────────────────────────────
 BG        = "#0a0a12"
@@ -57,19 +99,6 @@ WARN      = "#f9e2af"
 DANGER    = "#ff4466"
 GRID_CLR  = "#1a1a2e"
 CHART_BG  = "#0c0c18"
-GLOW_GREEN = "#00ff8855"
-GLOW_BLUE  = "#00ccff55"
-
-# ── Arrow key map ────────────────────────────────────────────────────────────
-ARROW_MAP = {
-    'Up': b'\x1b[A', 'Down': b'\x1b[B',
-    'Right': b'\x1b[C', 'Left': b'\x1b[D',
-}
-CMD_NAME = {
-    'Up': 'FORWARD', 'Down': 'REVERSE',
-    'Left': 'LEFT SPIN', 'Right': 'RIGHT SPIN',
-}
-USB_KW = ("PL2303", "Prolific", "CH340", "FTDI", "Silicon", "CP210", "USB Serial")
 
 
 def adc_to_voltage(v): return v / ADC_MAX * VAREF
@@ -127,19 +156,19 @@ class RcDashboard:
         self.root.geometry("1400x920")
         self.root.minsize(1200, 800)
 
-        self.ser = None
+        self.ser       = None
         self.connected = False
         self.active_key = None
-        self.speed = 8
-        self.sending = False
+        self.speed     = 5
+        self.sending   = False
 
-        self.ir_left = 0; self.ir_right = 0; self.us_dist = 0
-        self.roll = 0.0; self.pitch = 0.0; self.yaw = 0.0
+        self.ir_left  = 0; self.ir_right = 0; self.us_dist = 0
+        self.roll = 0.0;   self.pitch = 0.0;  self.yaw = 0.0
         self.rx_count = 0
 
         self.left_hist = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
         self.right_hist = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
-        self.us_hist = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
+        self.us_hist   = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
 
         self._build_ui()
         self._bind_keys()
@@ -150,19 +179,13 @@ class RcDashboard:
     # ════════════════════════════════════════════════════════════════
     def _build_ui(self):
         self._build_topbar()
-
         main = tk.Frame(self.root, bg=BG)
         main.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
-
-        # Top row: Controller | 3D View | Sensors
         top_row = tk.Frame(main, bg=BG)
         top_row.pack(fill=tk.BOTH, expand=True)
-
         self._build_controller(top_row)
         self._build_3d_view(top_row)
         self._build_sensor_panel(top_row)
-
-        # Bottom: Chart
         self._build_chart(main)
 
     def _build_topbar(self):
@@ -170,13 +193,11 @@ class RcDashboard:
         bar.pack(fill=tk.X)
         bar.pack_propagate(False)
 
-        # Title with glow effect
         tk.Label(bar, text="RC CAR TELEMETRY", bg="#06060e", fg=ACCENT,
                  font=("Consolas", 16, "bold")).pack(side=tk.LEFT, padx=20)
         tk.Label(bar, text="DASHBOARD", bg="#06060e", fg=ACCENT2,
                  font=("Consolas", 16, "bold")).pack(side=tk.LEFT)
 
-        # Connect button
         self._btn_conn = tk.Button(bar, text="CONNECT", width=12,
                                     bg="#1a2040", fg=ACCENT, relief=tk.FLAT,
                                     font=("Consolas", 10, "bold"), cursor="hand2",
@@ -184,13 +205,11 @@ class RcDashboard:
                                     command=self._toggle_connect)
         self._btn_conn.pack(side=tk.RIGHT, padx=16)
 
-        # Baud
         self._baud_combo = ttk.Combobox(bar, width=7, state="readonly", font=("Consolas", 9))
         self._baud_combo["values"] = ["9600","19200","38400","57600","115200"]
         self._baud_combo.set("38400")
         self._baud_combo.pack(side=tk.RIGHT, padx=4)
 
-        # Port
         self._combo = ttk.Combobox(bar, width=10, state="readonly", font=("Consolas", 9))
         self._combo.pack(side=tk.RIGHT, padx=4)
 
@@ -198,7 +217,6 @@ class RcDashboard:
                   font=("Consolas", 9), cursor="hand2",
                   command=self._refresh_ports).pack(side=tk.RIGHT, padx=4)
 
-        # Status
         self._led_cv = tk.Canvas(bar, width=12, height=12, bg="#06060e", highlightthickness=0)
         self._led_cv.pack(side=tk.RIGHT, padx=(10,4))
         self._led = self._led_cv.create_oval(1,1,11,11, fill=FG_DIM, outline="")
@@ -223,7 +241,6 @@ class RcDashboard:
         tk.Label(f, text="CONTROL", bg=CARD_BG, fg=ACCENT,
                  font=("Consolas", 11, "bold")).pack(pady=(12,4))
 
-        # Command display
         self._lbl_cmd = tk.Label(f, text="STANDBY", bg=CARD_BG, fg=FG_DIM,
                                   font=("Consolas", 18, "bold"))
         self._lbl_cmd.pack(pady=(8,12))
@@ -241,7 +258,8 @@ class RcDashboard:
 
         self._btn_left = tk.Button(grid, text="A", bg="#1a1a30", fg=FG, **btn_cfg)
         self._btn_left.grid(row=1, column=0, padx=2, pady=2)
-        self._btn_stop = tk.Button(grid, text="S", bg="#1a0a10", fg=DANGER, **btn_cfg)
+        self._btn_stop = tk.Button(grid, text="■", bg="#1a0a10", fg=DANGER, **btn_cfg,
+                                    command=self._send_stop)
         self._btn_stop.grid(row=1, column=1, padx=2, pady=2)
         self._btn_right = tk.Button(grid, text="D", bg="#1a1a30", fg=FG, **btn_cfg)
         self._btn_right.grid(row=1, column=2, padx=2, pady=2)
@@ -254,18 +272,23 @@ class RcDashboard:
             'Left': self._btn_left, 'Right': self._btn_right,
         }
 
+        # Mouse press/release on D-pad buttons
+        for d, btn in self._dpad_btns.items():
+            btn.bind('<ButtonPress-1>',   lambda e, k=d: self._key_press(k))
+            btn.bind('<ButtonRelease-1>', lambda e, k=d: self._key_release(k))
+
         # Speed
         tk.Label(f, text="THROTTLE", bg=CARD_BG, fg=FG_DIM,
                  font=("Consolas", 9)).pack(pady=(20,4))
 
-        self._lbl_speed = tk.Label(f, text="50%", bg=CARD_BG, fg=ACCENT,
+        self._lbl_speed = tk.Label(f, text=f"{self.speed*10}%", bg=CARD_BG, fg=ACCENT,
                                     font=("Consolas", 28, "bold"))
         self._lbl_speed.pack()
 
         spd_frm = tk.Frame(f, bg=CARD_BG)
         spd_frm.pack(pady=6)
         self._speed_btns = {}
-        for i in range(1,10):
+        for i in range(1, 10):
             active = (i == self.speed)
             btn = tk.Button(spd_frm, text=str(i), width=2,
                             bg=ACCENT if active else "#1a1a30",
@@ -275,12 +298,40 @@ class RcDashboard:
             btn.pack(side=tk.LEFT, padx=1)
             self._speed_btns[i] = btn
 
-        # Speed bar
         self._speed_bar = tk.Canvas(f, height=8, bg="#0a0a14", highlightthickness=0)
         self._speed_bar.pack(fill=tk.X, padx=30, pady=(4,0))
         self._draw_speed_bar()
 
-        tk.Label(f, text="Arrow keys / 1~9", bg=CARD_BG, fg=FG_DIM,
+        # ── Protocol Controls ────────────────────────────────────
+        tk.Frame(f, bg="#1e1e3a", height=1).pack(fill=tk.X, padx=12, pady=(14,8))
+
+        # Mode selector
+        mode_row = tk.Frame(f, bg=CARD_BG)
+        mode_row.pack(pady=(0,6))
+        tk.Label(mode_row, text="MODE", bg=CARD_BG, fg=FG_DIM,
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0,6))
+        self._mode_combo = ttk.Combobox(mode_row, width=13, state="readonly",
+                                         font=("Consolas", 9))
+        self._mode_combo["values"] = ["MANUAL", "CALIBRATION", "AUTO"]
+        self._mode_combo.current(0)
+        self._mode_combo.pack(side=tk.LEFT)
+        self._mode_combo.bind("<<ComboboxSelected>>", self._on_mode_change)
+
+        # PING button
+        self._btn_ping = tk.Button(f, text="PING", width=10,
+                                    bg="#1a2040", fg=ACCENT2, relief=tk.FLAT,
+                                    font=("Consolas", 9, "bold"), cursor="hand2",
+                                    command=self._send_ping)
+        self._btn_ping.pack(pady=(4,4))
+
+        # ACK / NACK status
+        tk.Label(f, text="LAST RESPONSE", bg=CARD_BG, fg=FG_DIM,
+                 font=("Consolas", 8)).pack()
+        self._lbl_ack = tk.Label(f, text="---", bg=CARD_BG, fg=FG_DIM,
+                                   font=("Consolas", 12, "bold"))
+        self._lbl_ack.pack(pady=(2,0))
+
+        tk.Label(f, text="WASD / 1~9 / Space=Stop", bg=CARD_BG, fg=FG_DIM,
                  font=("Consolas", 8)).pack(side=tk.BOTTOM, pady=10)
 
     # ── 3D Attitude View ─────────────────────────────────────────
@@ -292,7 +343,6 @@ class RcDashboard:
         tk.Label(f, text="3D ATTITUDE", bg=CARD_BG, fg=ACCENT2,
                  font=("Consolas", 11, "bold")).pack(pady=(8,0))
 
-        # Attitude numbers
         att_frm = tk.Frame(f, bg=CARD_BG)
         att_frm.pack(pady=(2,0))
 
@@ -308,9 +358,8 @@ class RcDashboard:
             lbl.pack()
             setattr(self, attr, lbl)
 
-        # 3D matplotlib canvas
         self.fig3d = Figure(figsize=(5,4), dpi=100, facecolor='#0a0a14')
-        self.ax3d = self.fig3d.add_subplot(111, projection='3d')
+        self.ax3d  = self.fig3d.add_subplot(111, projection='3d')
         self.ax3d.set_facecolor('#0a0a14')
         self.canvas3d = FigureCanvasTkAgg(self.fig3d, master=f)
         self.canvas3d.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=6, pady=(2,6))
@@ -325,11 +374,9 @@ class RcDashboard:
         tk.Label(f, text="PROXIMITY", bg=CARD_BG, fg=ACCENT_U,
                  font=("Consolas", 11, "bold")).pack(pady=(12,8))
 
-        # Ultrasonic (big)
         us_card = tk.Frame(f, bg="#0a0a18", highlightbackground="#1a3a2a",
                            highlightthickness=1)
         us_card.pack(fill=tk.X, padx=12, pady=(0,8))
-
         tk.Label(us_card, text="ULTRASONIC  FRONT", bg="#0a0a18", fg=ACCENT_U,
                  font=("Consolas", 9)).pack(pady=(6,0))
         self._lbl_us = tk.Label(us_card, text="0 cm", bg="#0a0a18", fg=ACCENT_U,
@@ -338,11 +385,9 @@ class RcDashboard:
         self._us_bar = tk.Canvas(us_card, height=10, bg="#060612", highlightthickness=0)
         self._us_bar.pack(fill=tk.X, padx=12, pady=(0,8))
 
-        # Car top-view with sensor beams
         self.car_top = tk.Canvas(f, bg="#0a0a14", highlightthickness=0, height=200)
         self.car_top.pack(fill=tk.X, padx=12, pady=4)
 
-        # IR Left
         ir_frm = tk.Frame(f, bg=CARD_BG)
         ir_frm.pack(fill=tk.X, padx=12, pady=(8,0))
 
@@ -358,7 +403,6 @@ class RcDashboard:
                                       font=("Consolas", 10))
         self._lbl_ir_l_cm.pack(pady=(0,4))
 
-        # IR Right
         right_card = tk.Frame(ir_frm, bg="#0a0a18", highlightbackground="#3a1a2a",
                               highlightthickness=1)
         right_card.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(3,0))
@@ -377,9 +421,8 @@ class RcDashboard:
                      highlightbackground="#1e1e3a", highlightthickness=1)
         f.pack(fill=tk.X, pady=(4,0))
         f.pack_propagate(False)
-
         self.fig_chart = Figure(figsize=(10,1.6), dpi=100, facecolor=CHART_BG)
-        self.ax_chart = self.fig_chart.add_subplot(111)
+        self.ax_chart  = self.fig_chart.add_subplot(111)
         self._setup_chart()
         self.canvas_chart = FigureCanvasTkAgg(self.fig_chart, master=f)
         self.canvas_chart.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -393,13 +436,11 @@ class RcDashboard:
         ax.tick_params(colors=FG_DIM, labelsize=7)
         ax.grid(True, color=GRID_CLR, alpha=0.5, linestyle="--")
         for s in ax.spines.values(): s.set_color(GRID_CLR)
-
         ax.axhspan(0, 20, alpha=0.06, color=DANGER)
         ax.axhline(y=20, color=DANGER, alpha=0.25, linestyle="--", linewidth=0.8)
-
         self.ln_l, = ax.plot([], [], color=ACCENT_L, lw=1.2, label="IR L", alpha=0.85)
         self.ln_r, = ax.plot([], [], color=ACCENT_R, lw=1.2, label="IR R", alpha=0.85)
-        self.ln_u, = ax.plot([], [], color=ACCENT_U, lw=2.0, label="US", alpha=0.9)
+        self.ln_u, = ax.plot([], [], color=ACCENT_U, lw=2.0, label="US",   alpha=0.9)
         ax.legend(loc="upper right", facecolor=CHART_BG, edgecolor=GRID_CLR,
                   labelcolor=FG_DIM, fontsize=7)
         self.fig_chart.tight_layout(pad=1.5)
@@ -413,7 +454,6 @@ class RcDashboard:
                                            cache_frame_data=False)
 
     def _update_all(self, frame):
-        # Sensor distances
         lv = adc_to_voltage(self.ir_left)
         rv = adc_to_voltage(self.ir_right)
         ld = voltage_to_distance_cm(lv)
@@ -429,7 +469,6 @@ class RcDashboard:
         self.ln_r.set_data(x, list(self.right_hist))
         self.ln_u.set_data(x, list(self.us_hist))
 
-        # Update sensor labels
         self._lbl_ir_l.configure(text=str(self.ir_left))
         self._lbl_ir_l_cm.configure(text=f"{ld:.0f} cm")
         self._lbl_ir_r.configure(text=str(self.ir_right))
@@ -439,18 +478,12 @@ class RcDashboard:
         self._lbl_us.configure(text=f"{ud:.0f} cm", fg=us_color)
         self._draw_bar(self._us_bar, ud, 200, ACCENT_U)
 
-        # Update attitude labels
         self._lbl_roll.configure(text=f"{self.roll:+07.1f}")
         self._lbl_pitch.configure(text=f"{self.pitch:+07.1f}")
         self._lbl_yaw.configure(text=f"{self.yaw:+07.1f}")
 
-        # 3D view
         self._draw_3d()
-
-        # Top-view car
         self._draw_car_top(ld, rd, ud)
-
-        # RX counter
         self._rx_var.set(f"RX:{self.rx_count}")
 
         self.canvas_chart.draw_idle()
@@ -484,17 +517,14 @@ class RcDashboard:
         ax = self.ax3d
         ax.cla()
         ax.set_facecolor('#0a0a14')
-
         R = rotation_matrix(self.roll, self.pitch, self.yaw)
 
-        # Car body
         rotated = (R @ CAR_BODY.T).T
         faces = [[rotated[v] for v in f] for f in CAR_FACES]
         poly = Poly3DCollection(faces, facecolors=CAR_COLORS,
                                 edgecolors="#ffffff40", linewidths=0.8)
         ax.add_collection3d(poly)
 
-        # Wheels
         for wh in WHEELS:
             rw = (R @ wh.T).T
             wf = [[rw[v] for v in f] for f in CAR_FACES]
@@ -502,18 +532,15 @@ class RcDashboard:
                                   edgecolors="#333333", linewidths=0.5)
             ax.add_collection3d(wp)
 
-        # Nose arrow
         nose = R @ np.array([0, 2.8, 0])
         ax.quiver(0,0,0, nose[0],nose[1],nose[2], color=ACCENT,
                   arrow_length_ratio=0.15, linewidth=2.5)
 
-        # Reference axes (subtle)
         al = 3.0
         ax.quiver(0,0,0, al,0,0, color="#ff444444", arrow_length_ratio=0.08, linewidth=0.8)
         ax.quiver(0,0,0, 0,al,0, color="#44ff4444", arrow_length_ratio=0.08, linewidth=0.8)
         ax.quiver(0,0,0, 0,0,al, color="#4444ff44", arrow_length_ratio=0.08, linewidth=0.8)
 
-        # Grid plane (subtle)
         grid_pts = np.linspace(-3, 3, 7)
         for g in grid_pts:
             ax.plot([g,g],[-3,3],[-3], color=GRID_CLR, linewidth=0.3, alpha=0.3)
@@ -523,7 +550,6 @@ class RcDashboard:
         ax.set_xlim([-lim,lim]); ax.set_ylim([-lim,lim]); ax.set_zlim([-lim,lim])
         ax.set_box_aspect([1,1,1])
         ax.set_axis_off()
-
         self.canvas3d.draw_idle()
 
     def _draw_car_top(self, ld, rd, ud):
@@ -536,19 +562,16 @@ class RcDashboard:
         cx, cy = w//2, h//2 + 15
         cw, ch = 50, 75
 
-        # Car body
         c.create_rectangle(cx-cw//2, cy-ch//2, cx+cw//2, cy+ch//2,
                            fill="#1a1a30", outline="#2a2a50", width=1)
         c.create_text(cx, cy+5, text="TC237", fill=FG_DIM, font=("Consolas",8))
 
-        # Wheels
         for dy in [-28, 28]:
             c.create_rectangle(cx-cw//2-5, cy+dy-8, cx-cw//2, cy+dy+8,
                                fill="#333355", outline="")
             c.create_rectangle(cx+cw//2, cy+dy-8, cx+cw//2+5, cy+dy+8,
                                fill="#333355", outline="")
 
-        # Ultrasonic cone
         front_y = cy - ch//2
         us_len = max(12, min(60, ud * 0.5))
         uc = DANGER if ud < 20 else (WARN if ud < 50 else ACCENT_U)
@@ -558,7 +581,6 @@ class RcDashboard:
         c.create_text(cx, front_y-us_len-10, text=f"{ud:.0f}cm",
                       fill=uc, font=("Consolas",10,"bold"))
 
-        # IR beams
         angle = math.radians(45)
         sp = 10
 
@@ -584,18 +606,22 @@ class RcDashboard:
     # Keys
     # ════════════════════════════════════════════════════════════════
     def _bind_keys(self):
-        for k in ['Up','Down','Left','Right']:
-            self.root.bind(f'<KeyPress-{k}>', lambda e, d=k: self._key_press(d))
-            self.root.bind(f'<KeyRelease-{k}>', lambda e, d=k: self._key_release(d))
-        for i in range(1,10):
+        wasd = [('w','Up'),('W','Up'),('s','Down'),('S','Down'),
+                ('a','Left'),('A','Left'),('d','Right'),('D','Right')]
+        for k, direction in wasd:
+            self.root.bind(f'<KeyPress-{k}>',   lambda e, d=direction: self._key_press(d))
+            self.root.bind(f'<KeyRelease-{k}>', lambda e, d=direction: self._key_release(d))
+        for i in range(1, 10):
             self.root.bind(str(i), lambda e, n=i: self._set_speed(n))
         self.root.bind('<Escape>', lambda e: self.on_close())
+        self.root.bind('<space>',  lambda e: self._send_stop())
 
     def _key_press(self, d):
-        if not self.connected or self.active_key == d: return
+        if not self.connected or self.active_key == d:
+            return
         self.active_key = d
         self._update_dpad(d)
-        self._lbl_cmd.configure(text=CMD_NAME.get(d,"?"), fg=ACCENT)
+        self._lbl_cmd.configure(text=CMD_NAME.get(d, "?"), fg=ACCENT)
         if not self.sending:
             self.sending = True
             threading.Thread(target=self._send_loop, daemon=True).start()
@@ -606,16 +632,44 @@ class RcDashboard:
             self.sending = False
             self._update_dpad(None)
             self._lbl_cmd.configure(text="STANDBY", fg=FG_DIM)
+            self._write_packet(build_packet(CMD_MOVE, bytes([DIR_STOP, 0])))
 
     def _send_loop(self):
+        """Repeatedly send MOVE packet at SEND_INTERVAL while key is held."""
         while self.sending and self.connected:
             k = self.active_key
-            if k and k in ARROW_MAP:
-                try: self.ser.write(ARROW_MAP[k])
-                except: break
-            else: break
+            if k and k in DIR_MAP:
+                pkt = build_packet(CMD_MOVE, bytes([DIR_MAP[k], self.speed * 10]))
+                if not self._write_packet(pkt):
+                    break
+            else:
+                break
             time.sleep(SEND_INTERVAL)
         self.sending = False
+
+    def _send_stop(self):
+        self.active_key = None
+        self.sending = False
+        self._update_dpad(None)
+        self._lbl_cmd.configure(text="STANDBY", fg=FG_DIM)
+        self._write_packet(build_packet(CMD_MOVE, bytes([DIR_STOP, 0])))
+
+    def _send_ping(self):
+        self._write_packet(build_packet(CMD_PING))
+
+    def _on_mode_change(self, _event=None):
+        mode_idx = self._mode_combo.current()   # 0=MANUAL, 1=CALIB, 2=AUTO
+        self._write_packet(build_packet(CMD_MODE, bytes([mode_idx])))
+
+    def _write_packet(self, pkt):
+        """Send packet; returns False on error."""
+        if not self.connected or not self.ser:
+            return False
+        try:
+            self.ser.write(pkt)
+            return True
+        except Exception:
+            return False
 
     def _update_dpad(self, active):
         for d, btn in self._dpad_btns.items():
@@ -632,9 +686,9 @@ class RcDashboard:
                           fg=BG if i==n else FG_DIM)
         self._lbl_speed.configure(text=f"{n*10}%")
         self._draw_speed_bar()
-        if self.connected:
-            try: self.ser.write(str(n).encode())
-            except: pass
+        # If currently moving, immediately update speed
+        if self.connected and self.active_key and self.active_key in DIR_MAP:
+            self._write_packet(build_packet(CMD_MOVE, bytes([DIR_MAP[self.active_key], n * 10])))
 
     # ════════════════════════════════════════════════════════════════
     # Serial
@@ -664,7 +718,7 @@ class RcDashboard:
             messagebox.showerror("Error", f"Cannot open {port}\n{e}"); return
 
         self.connected = True
-        self.rx_count = 0
+        self.rx_count  = 0
         self._btn_conn.configure(text="DISCONNECT", fg=DANGER)
         self._status_var.set(f"{port}@{baud}")
         self._led_cv.itemconfigure(self._led, fill=ACCENT)
@@ -675,7 +729,7 @@ class RcDashboard:
 
     def _disconnect(self):
         self.connected = False
-        self.sending = False
+        self.sending   = False
         self.active_key = None
         if self.ser:
             try: self.ser.close()
@@ -689,53 +743,125 @@ class RcDashboard:
         self._update_dpad(None)
         self._lbl_cmd.configure(text="STANDBY", fg=FG_DIM)
 
+    # ── RX: mixed binary packet + text line parser ────────────────
     def _read_serial(self):
-        buf = ""
+        rx_buf = bytearray()
         while self.connected and self.ser and self.ser.is_open:
             try:
                 raw = self.ser.read(self.ser.in_waiting or 1)
-                if not raw: continue
-                buf += raw.decode("ascii", errors="ignore")
-                while "\n" in buf:
-                    line, buf = buf.split("\n", 1)
-                    line = line.strip()
-                    # Sensor data: "L:xxxx,R:xxxx,U:xxx"
-                    if line.startswith("L:") and ",R:" in line and ",U:" in line:
-                        try:
-                            p = line.split(",")
-                            self.ir_left = int(p[0][2:])
-                            self.ir_right = int(p[1][2:])
-                            self.us_dist = int(p[2][2:])
-                            self.rx_count += 1
-                        except: pass
-                    # IMU data: "R:+xxx.x,P:+xxx.x,Y:+xxx.x"
-                    elif line.startswith("R:") and ",P:" in line and ",Y:" in line:
-                        try:
-                            p = line.split(",")
-                            self.roll = float(p[0][2:])
-                            self.pitch = float(p[1][2:])
-                            self.yaw = float(p[2][2:])
-                            self.rx_count += 1
-                        except: pass
-            except: break
+                if not raw:
+                    continue
+                rx_buf.extend(raw)
+
+                while True:
+                    if not rx_buf:
+                        break
+
+                    stx_pos = rx_buf.find(b'\xaa')
+                    nl_pos  = rx_buf.find(b'\n')
+
+                    # Nothing actionable yet
+                    if stx_pos == -1 and nl_pos == -1:
+                        if len(rx_buf) > 256:
+                            rx_buf.clear()
+                        break
+
+                    # Binary packet arrives before (or instead of) text line
+                    if stx_pos != -1 and (nl_pos == -1 or stx_pos < nl_pos):
+                        # Discard junk before STX
+                        if stx_pos > 0:
+                            rx_buf = rx_buf[stx_pos:]
+                            continue
+                        # Need at least STX + LEN
+                        if len(rx_buf) < 2:
+                            break
+                        pkt_len = rx_buf[1]
+                        # Sanity-check LEN before allocating
+                        if pkt_len == 0 or pkt_len > PROTO_MAX_PKT_LEN:
+                            rx_buf = rx_buf[1:]   # skip bad STX
+                            continue
+                        total = 1 + 1 + pkt_len + 1 + 1  # STX LEN [CMD+PLD] CHK ETX
+                        if len(rx_buf) < total:
+                            break   # wait for more bytes
+                        pkt = bytes(rx_buf[:total])
+                        rx_buf = rx_buf[total:]
+                        if pkt[-1] == PROTO_ETX:
+                            self._handle_binary_packet(pkt)
+
+                    # Text line
+                    elif nl_pos != -1:
+                        line = rx_buf[:nl_pos].decode('ascii', errors='ignore').strip()
+                        rx_buf = rx_buf[nl_pos + 1:]
+                        if line:
+                            self._handle_text_line(line)
+                    else:
+                        break
+
+            except Exception:
+                break
 
         self.connected = False
         try:
             self.root.after(0, lambda: self._status_var.set("OFFLINE"))
             self.root.after(0, lambda: self._btn_conn.configure(text="CONNECT", fg=ACCENT))
             self.root.after(0, lambda: self._led_cv.itemconfigure(self._led, fill=FG_DIM))
-        except tk.TclError: pass
+        except tk.TclError:
+            pass
+
+    def _handle_binary_packet(self, pkt):
+        """pkt: bytes  →  AA LEN CMD [PAYLOAD] CHK ETX"""
+        if len(pkt) < 5:
+            return
+        cmd = pkt[2]
+        if cmd == CMD_ACK:
+            orig = pkt[3] if len(pkt) > 5 else 0
+            label = f"ACK  CMD={orig:02X}"
+            color = ACCENT
+        elif cmd == CMD_NACK:
+            err   = pkt[3] if len(pkt) > 5 else 0
+            label = f"NACK {NACK_NAMES.get(err, f'E{err:02X}')}"
+            color = DANGER
+        else:
+            return
+        self.rx_count += 1
+        # Schedule UI update on main thread
+        self.root.after(0, lambda l=label, c=color:
+                        self._lbl_ack.configure(text=l, fg=c))
+
+    def _handle_text_line(self, line):
+        """Parse sensor or IMU text lines."""
+        # Sensor: "L:xxxx,R:xxxx,U:xxx"
+        if line.startswith("L:") and ",R:" in line and ",U:" in line:
+            try:
+                parts = line.split(",")
+                self.ir_left  = int(parts[0][2:])
+                self.ir_right = int(parts[1][2:])
+                self.us_dist  = int(parts[2][2:])
+                self.rx_count += 1
+            except Exception:
+                pass
+        # IMU: "R:+xxx.x,P:+xxx.x,Y:+xxx.x"
+        elif line.startswith("R:") and ",P:" in line and ",Y:" in line:
+            try:
+                parts = line.split(",")
+                self.roll  = float(parts[0][2:])
+                self.pitch = float(parts[1][2:])
+                self.yaw   = float(parts[2][2:])
+                self.rx_count += 1
+            except Exception:
+                pass
 
     def on_close(self):
         self.connected = False
-        self.sending = False
-        if self.ser and self.ser.is_open: self.ser.close()
+        self.sending   = False
+        if self.ser and self.ser.is_open:
+            self.ser.close()
         self.root.destroy()
 
 
 def main():
     root = tk.Tk()
-    app = RcDashboard(root)
+    app  = RcDashboard(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
 

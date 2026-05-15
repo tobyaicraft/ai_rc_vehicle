@@ -20,7 +20,7 @@
 #include "DrvMpu9250.h"
 #include "AppVehicle.h"
 #include "DrvMotor.h"
-#include "AppMotorTest.h"
+#include "AppProtocol.h"
 #include "Scheduler.h"
 
 /******************************************************************************/
@@ -41,6 +41,7 @@ void core0_main(void)
 
     DrvMotor_Init();
     AppVehicle_Init();
+    AppProtocol_Init();
 
     /* 글로벌 인터럽트 Enable (SPI ISR 필요) */
     IfxCpu_enableInterrupts();
@@ -54,7 +55,6 @@ void core0_main(void)
     /* 메인 루프: 스케줄러 실행 */
     while (1)
     {
-        AppMotorTest_Sequence();
-        //Scheduler_Run();
+        Scheduler_Run();
     }
 }

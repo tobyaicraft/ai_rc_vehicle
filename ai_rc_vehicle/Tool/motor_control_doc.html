@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: "맑은 고딕", "Malgun Gothic", sans-serif; font-size: 11pt; color: #000; margin: 40px; }
+  h2   { font-size: 13pt; font-weight: bold; margin-top: 24px; margin-bottom: 6px; }
+  h3   { font-size: 12pt; font-weight: bold; margin-top: 18px; margin-bottom: 4px; }
+  p    { margin: 4px 0 10px 0; }
+
+  /* ── 설계 표 ── */
+  table.design {
+    border-collapse: collapse;
+    width: 100%;
+    margin-bottom: 16px;
+  }
+  table.design th {
+    background-color: #dce6f1;
+    border: 1px solid #9bb0c9;
+    padding: 6px 10px;
+    text-align: center;
+    font-weight: bold;
+    font-size: 11pt;
+  }
+  table.design td {
+    border: 1px solid #9bb0c9;
+    padding: 6px 10px;
+    text-align: center;
+    font-size: 11pt;
+  }
+  td.note { text-align: left; }
+  td.plus  { color: #1f4e79; font-weight: bold; }
+  td.minus { color: #833c00; font-weight: bold; }
+  td.coast { color: #595959; }
+
+  /* ── 코드 블록 ── */
+  pre {
+    background-color: #f5f5f5;
+    border: 1px solid #cccccc;
+    border-left: 4px solid #4472c4;
+    padding: 12px 16px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 10pt;
+    line-height: 1.55;
+    white-space: pre;
+    margin: 0 0 16px 0;
+  }
+  .kw  { color: #0000cc; font-weight: bold; }
+  .cm  { color: #5a7a5a; }
+  .fn  { color: #7a1010; }
+  .num { color: #098658; }
+</style>
+</head>
+<body>
+
+<h2>모터 제어 동작 설계</h2>
+<p>4WD 차량의 좌/우측 모터 방향을 독립 제어하여 전진·후진·제자리 회전을 구현한다.</p>
+
+<table class="design">
+  <tr>
+    <th>동작</th>
+    <th>FL · RL (좌측)</th>
+    <th>FR · RR (우측)</th>
+    <th>결과</th>
+  </tr>
+  <tr>
+    <td>전진</td>
+    <td class="plus">+ 속도</td>
+    <td class="plus">+ 속도</td>
+    <td>직진</td>
+  </tr>
+  <tr>
+    <td>후진</td>
+    <td class="minus">− 속도</td>
+    <td class="minus">− 속도</td>
+    <td>후진</td>
+  </tr>
+  <tr>
+    <td>제자리 좌회전</td>
+    <td class="minus">− 속도</td>
+    <td class="plus">+ 속도</td>
+    <td class="note">우측 바퀴 전진, 좌측 바퀴 후진 → 좌회전</td>
+  </tr>
+  <tr>
+    <td>제자리 우회전</td>
+    <td class="plus">+ 속도</td>
+    <td class="minus">− 속도</td>
+    <td class="note">좌측 바퀴 전진, 우측 바퀴 후진 → 우회전</td>
+  </tr>
+  <tr>
+    <td>정지</td>
+    <td class="coast">Coast</td>
+    <td class="coast">Coast</td>
+    <td>관성 정지 (브레이크 없음)</td>
+  </tr>
+</table>
+
+<p>※ 전륜(FL·FR)에는 후륜 대비 <strong>86 %</strong> 보정 계수를 적용한다
+   (<code>spdF = speed × 0.86</code>). 전·후륜 구동력 차이를 보상하기 위함이다.</p>
+
+
+<h2>코드 구현 — <code>AppVehicle_Update()</code></h2>
+<p>스케줄러가 10 ms 주기로 호출하며, 전역 변수
+<code>g_vehicleCmd</code>·<code>g_vehicleSpeed</code>를 읽어 모터 듀티를 설정한다.</p>
+
+<pre><span class="kw">void</span> <span class="fn">AppVehicle_Update</span>(<span class="kw">void</span>)
+{
+    sint16 spd  = (sint16)g_vehicleSpeed;
+    sint16 spdF = (sint16)(g_vehicleSpeed * <span class="num">0.86f</span>);  <span class="cm">/* 전륜 보정 86 % */</span>
+
+    <span class="kw">switch</span> ((VehicleCommand)g_vehicleCmd)
+    {
+    <span class="kw">case</span> VEHICLE_FORWARD:
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_FL,  spdF);   <span class="cm">/* 좌전륜  +속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_FR,  spdF);   <span class="cm">/* 우전륜  +속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_RL,  spd);    <span class="cm">/* 좌후륜  +속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_RR,  spd);    <span class="cm">/* 우후륜  +속도 */</span>
+        <span class="kw">break</span>;
+
+    <span class="kw">case</span> VEHICLE_REVERSE:
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_FL, -spdF);   <span class="cm">/* 좌전륜  −속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_FR, -spdF);   <span class="cm">/* 우전륜  −속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_RL, -spd);    <span class="cm">/* 좌후륜  −속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_RR, -spd);    <span class="cm">/* 우후륜  −속도 */</span>
+        <span class="kw">break</span>;
+
+    <span class="kw">case</span> VEHICLE_SPIN_LEFT:
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_FL, -spdF);   <span class="cm">/* 좌전륜  −속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_FR,  spdF);   <span class="cm">/* 우전륜  +속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_RL, -spd);    <span class="cm">/* 좌후륜  −속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_RR,  spd);    <span class="cm">/* 우후륜  +속도 */</span>
+        <span class="kw">break</span>;
+
+    <span class="kw">case</span> VEHICLE_SPIN_RIGHT:
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_FL,  spdF);   <span class="cm">/* 좌전륜  +속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_FR, -spdF);   <span class="cm">/* 우전륜  −속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_RL,  spd);    <span class="cm">/* 좌후륜  +속도 */</span>
+        <span class="fn">DrvMotor_SetDuty</span>(MOTOR_RR, -spd);    <span class="cm">/* 우후륜  −속도 */</span>
+        <span class="kw">break</span>;
+
+    <span class="kw">default</span>: <span class="cm">/* VEHICLE_STOP */</span>
+        <span class="fn">DrvMotor_Coast</span>(MOTOR_FL);
+        <span class="fn">DrvMotor_Coast</span>(MOTOR_FR);
+        <span class="fn">DrvMotor_Coast</span>(MOTOR_RL);
+        <span class="fn">DrvMotor_Coast</span>(MOTOR_RR);
+        <span class="kw">break</span>;
+    }
+}</pre>
+
+</body>
+</html>
