@@ -77,14 +77,24 @@ boolean DrvFlash_SaveCalibration(void)
     uint16 endinitPw = IfxScuWdt_getCpuWatchdogPassword();
     IfxScuWdt_clearCpuEndinit(endinitPw);
 
-    /* 1) 상태 클리어 */
-    IfxFlash_clearStatus(0);
+    /* 1) Erase (최대 3회 재시도) */
+    {
+        uint8 retry;
+        for (retry = 0u; retry < 3u; retry++)
+        {
+            IfxFlash_clearStatus(0);
+            IfxFlash_eraseSector(CAL_FLASH_ADDR);
+            IfxFlash_waitUnbusy(0, IfxFlash_FlashType_D0);
 
-    /* 2) Sector 0 Erase */
-    IfxFlash_eraseSector(CAL_FLASH_ADDR);
-    IfxFlash_waitUnbusy(0, IfxFlash_FlashType_D0);
+            /* 지워졌는지 검증 (첫 4바이트가 0이면 OK) */
+            if (*((volatile uint32 *)CAL_FLASH_ADDR) == 0x00000000u)
+            {
+                break;
+            }
+        }
+    }
 
-    /* 3) Page Mode 진입 */
+    /* 2) Page Mode 진입 */
     IfxFlash_enterPageMode(CAL_FLASH_ADDR);
 
     /* 4) 8바이트 데이터 로드 */
@@ -114,13 +124,20 @@ boolean DrvFlash_EraseSector(void)
     uint16 endinitPw = IfxScuWdt_getCpuWatchdogPassword();
     IfxScuWdt_clearCpuEndinit(endinitPw);
 
-    IfxFlash_clearStatus(0);
-    IfxFlash_eraseSector(CAL_FLASH_ADDR);
-    IfxFlash_waitUnbusy(0, IfxFlash_FlashType_D0);
+    uint8 retry;
+    for (retry = 0u; retry < 3u; retry++)
+    {
+        IfxFlash_clearStatus(0);
+        IfxFlash_eraseSector(CAL_FLASH_ADDR);
+        IfxFlash_waitUnbusy(0, IfxFlash_FlashType_D0);
+
+        if (*((volatile uint32 *)CAL_FLASH_ADDR) == 0x00000000u)
+        {
+            break;
+        }
+    }
 
     IfxScuWdt_setCpuEndinit(endinitPw);
 
-    const DrvFlash_CalData *pVerify = (const DrvFlash_CalData *)CAL_FLASH_ADDR;
-    return ((pVerify->magicLo != DRVFLASH_MAGIC_LO) ||
-            (pVerify->magicHi != DRVFLASH_MAGIC_HI)) ? TRUE : FALSE;
+    return (*((volatile uint32 *)CAL_FLASH_ADDR) == 0x00000000u) ? TRUE : FALSE;
 }
