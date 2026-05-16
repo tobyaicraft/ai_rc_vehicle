@@ -11,6 +11,13 @@
  *   0x01 MOVE  : dir(1B) + speed(1B)   → 방향·속도 제어
  *   0x02 MODE  : mode(1B)              → 동작 모드 전환
  *   0x10 PING  : (없음)                → 연결 확인
+ *   0x20 CAL_BAT : multiplier_hi(1B) + multiplier_lo(1B) → 배터리 보정 계수 설정 (RAM)
+ *   0x21 CAL_SAVE: (없음)              → RAM → DFLASH 저장
+ *   0x22 CAL_LOAD: (없음)              → DFLASH → RAM 로드
+ *   0x23 CAL_DUTY: FL(1B) + FR(1B) + RL(1B) + RR(1B) → 모터 Duty 설정 (RAM)
+ *   0x24 CAL_TURN: front(1B) + rear(1B) → 회전 팩터 설정 (RAM)
+ *   0x25 CAL_QUERY: (없음) → 현재 캘리브레이션 값 텍스트로 응답
+ *   0x25 CAL_TEST: motor_id(1B) + duty(1B) → 개별 모터 테스트 구동
  *   0x80 ACK   : origCmd(1B)           → 수신 확인 응답 (송신 전용)
  *   0xE0 NACK  : errCode(1B)           → 수신 실패 응답 (송신 전용)
  *********************************************************************************************************************/
@@ -28,6 +35,13 @@
 #define CMD_MOVE    0x01u
 #define CMD_MODE    0x02u
 #define CMD_PING    0x10u
+#define CMD_CAL_BAT  0x20u
+#define CMD_CAL_SAVE 0x21u
+#define CMD_CAL_LOAD 0x22u
+#define CMD_CAL_DUTY 0x23u
+#define CMD_CAL_TURN  0x24u
+#define CMD_CAL_QUERY 0x25u
+#define CMD_CAL_ERASE 0x26u
 #define CMD_ACK     0x80u
 #define CMD_NACK    0xE0u
 

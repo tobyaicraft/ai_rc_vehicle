@@ -21,6 +21,8 @@
 #include "AppVehicle.h"
 #include "DrvMotor.h"
 #include "AppProtocol.h"
+#include "DrvFlash.h"
+#include "DrvBuzzer.h"
 #include "Scheduler.h"
 
 /******************************************************************************/
@@ -38,6 +40,7 @@ void core0_main(void)
     DrvAdc_Init();          /* VADC IR sensors (AN1, AN12) */
     DrvUltrasonic_Init();   /* HC-SR04 (Trig=P02.6 GPIO, Echo=P02.7 TIM0_7) */
     DrvSpi_Init();          /* QSPI3 SPI Master (MPU-9250) */
+    DrvBuzzer_Init();       /* TOM0_Ch10 P02.2 (passive buzzer 2kHz) */
 
     DrvMotor_Init();
     AppVehicle_Init();
@@ -48,6 +51,9 @@ void core0_main(void)
 
     /* MPU-9250 초기화: SPI ISR이 필요하므로 인터럽트 활성화 후 수행 */
     DrvMpu9250_Init();
+
+    /* 캘리브레이션 데이터 Flash → RAM 복원 */
+    DrvFlash_LoadCalibration();
 
     DrvUart_SendString("=== AI RC Vehicle Ready ===\r\n");
     DrvUart1_SendString("=== AI RC Vehicle Ready (BLE) ===\r\n");

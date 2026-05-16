@@ -7,6 +7,7 @@
 #include "DrvUart.h"
 #include "DrvUart1.h"
 #include "DrvGtmTimer.h"
+#include "DrvFlash.h"
 
 /******************************************************************************/
 /*                           Types                                            */
@@ -127,6 +128,168 @@ static void dispatchPacket(const Parser *p, uint8 ch)
         if (p->payloadLen == 0u)
         {
             sendAck(CMD_PING, ch);
+        }
+        else
+        {
+            sendNack(NACK_ERR_LEN, ch);
+        }
+        break;
+
+    case CMD_CAL_BAT:
+        if (p->payloadLen == 2u)
+        {
+            /* payload[0]=hi, payload[1]=lo → uint16 multiplier (x1000) */
+            uint16 mul = ((uint16)p->payload[0] << 8) | (uint16)p->payload[1];
+            if ((mul >= 1000u) && (mul <= 4000u))
+            {
+                g_batMultiplier = mul;
+                sendAck(CMD_CAL_BAT, ch);
+            }
+            else
+            {
+                sendNack(NACK_ERR_CMD, ch);
+            }
+        }
+        else
+        {
+            sendNack(NACK_ERR_LEN, ch);
+        }
+        break;
+
+    case CMD_CAL_SAVE:
+        if (p->payloadLen == 0u)
+        {
+            if (DrvFlash_SaveCalibration())
+                sendAck(CMD_CAL_SAVE, ch);
+            else
+                sendNack(NACK_ERR_CMD, ch);
+        }
+        else
+        {
+            sendNack(NACK_ERR_LEN, ch);
+        }
+        break;
+
+    case CMD_CAL_LOAD:
+        if (p->payloadLen == 0u)
+        {
+            if (DrvFlash_LoadCalibration())
+                sendAck(CMD_CAL_LOAD, ch);
+            else
+                sendNack(NACK_ERR_CMD, ch);
+        }
+        else
+        {
+            sendNack(NACK_ERR_LEN, ch);
+        }
+        break;
+
+    case CMD_CAL_DUTY:
+        if (p->payloadLen == 4u)
+        {
+            /* payload: FL, FR, RL, RR (0~100%) */
+            uint8 fl = p->payload[0];
+            uint8 fr = p->payload[1];
+            uint8 rl = p->payload[2];
+            uint8 rr = p->payload[3];
+            if ((fl <= 100u) && (fr <= 100u) && (rl <= 100u) && (rr <= 100u))
+            {
+                g_calDutyFL = fl;
+                g_calDutyFR = fr;
+                g_calDutyRL = rl;
+                g_calDutyRR = rr;
+                sendAck(CMD_CAL_DUTY, ch);
+            }
+            else
+            {
+                sendNack(NACK_ERR_CMD, ch);
+            }
+        }
+        else
+        {
+            sendNack(NACK_ERR_LEN, ch);
+        }
+        break;
+
+    case CMD_CAL_TURN:
+        if (p->payloadLen == 2u)
+        {
+            /* payload: front, rear (0~100%) */
+            uint8 front = p->payload[0];
+            uint8 rear  = p->payload[1];
+            if ((front <= 100u) && (rear <= 100u))
+            {
+                g_calTurnFront = front;
+                g_calTurnRear  = rear;
+                sendAck(CMD_CAL_TURN, ch);
+            }
+            else
+            {
+                sendNack(NACK_ERR_CMD, ch);
+            }
+        }
+        else
+        {
+            sendNack(NACK_ERR_LEN, ch);
+        }
+        break;
+
+    case CMD_CAL_QUERY:
+        if (p->payloadLen == 0u)
+        {
+            /* 현재 캘리브레이션 값을 텍스트로 전송 */
+            char buf[64];
+            char *ptr = buf;
+            /* "CAL:FL,FR,RL,RR,FT,RT,BATMUL\r\n" */
+            static const char hex[] = "0123456789";
+            #define PUT_U8(v) do { \
+                uint8 _v = (v); \
+                if (_v >= 100u) *ptr++ = hex[_v / 100u]; \
+                if (_v >= 10u)  *ptr++ = hex[(_v / 10u) % 10u]; \
+                *ptr++ = hex[_v % 10u]; \
+            } while(0)
+            #define PUT_U16(v) do { \
+                uint16 _v = (v); \
+                if (_v >= 10000u) *ptr++ = hex[_v / 10000u]; \
+                if (_v >= 1000u)  *ptr++ = hex[(_v / 1000u) % 10u]; \
+                if (_v >= 100u)   *ptr++ = hex[(_v / 100u) % 10u]; \
+                if (_v >= 10u)    *ptr++ = hex[(_v / 10u) % 10u]; \
+                *ptr++ = hex[_v % 10u]; \
+            } while(0)
+
+            *ptr++ = 'C'; *ptr++ = 'A'; *ptr++ = 'L'; *ptr++ = ':';
+            PUT_U8(g_calDutyFL); *ptr++ = ',';
+            PUT_U8(g_calDutyFR); *ptr++ = ',';
+            PUT_U8(g_calDutyRL); *ptr++ = ',';
+            PUT_U8(g_calDutyRR); *ptr++ = ',';
+            PUT_U8(g_calTurnFront); *ptr++ = ',';
+            PUT_U8(g_calTurnRear);  *ptr++ = ',';
+            PUT_U16(g_batMultiplier);
+            *ptr++ = '\r'; *ptr++ = '\n'; *ptr = '\0';
+
+            if (ch == 0u)
+                DrvUart_SendString(buf);
+            else
+                DrvUart1_SendString(buf);
+
+            sendAck(CMD_CAL_QUERY, ch);
+
+            #undef PUT_U8
+            #undef PUT_U16
+        }
+        else
+        {
+            sendNack(NACK_ERR_LEN, ch);
+        }
+        break;
+
+    case CMD_CAL_ERASE:
+        if (p->payloadLen == 0u)
+        {
+            if (DrvFlash_EraseSector())
+                sendAck(CMD_CAL_ERASE, ch);
+            else
+                sendNack(NACK_ERR_CMD, ch);
         }
         else
         {

@@ -9,7 +9,7 @@ TX: Packet protocol  STX(0xAA) | LEN | CMD | PAYLOAD | CHK | ETX(0x55)
     CMD_PING (0x10): no payload
 
 RX (binary): ACK (0x80) / NACK (0xE0) packets
-RX (text):   "L:xxxx,R:xxxx,U:xxx\\r\\n"  (IR + Ultrasonic)
+RX (text):   "L:xxxx,R:xxxx,U:xxx,B:xxxx\\r\\n"  (IR + US + Battery mV)
              "R:+xxx.x,P:+xxx.x,Y:+xxx.x\\r\\n"  (IMU attitude)
 
 Usage:
@@ -56,11 +56,18 @@ SEND_INTERVAL  = 0.05   # 50ms MOVE repeat interval
 # ── Packet Protocol ──────────────────────────────────────────────────────────
 PROTO_STX = 0xAA
 PROTO_ETX = 0x55
-CMD_MOVE  = 0x01
-CMD_MODE  = 0x02
-CMD_PING  = 0x10
-CMD_ACK   = 0x80
-CMD_NACK  = 0xE0
+CMD_MOVE     = 0x01
+CMD_MODE     = 0x02
+CMD_PING     = 0x10
+CMD_CAL_BAT  = 0x20
+CMD_CAL_SAVE = 0x21
+CMD_CAL_LOAD = 0x22
+CMD_CAL_DUTY = 0x23
+CMD_CAL_TURN  = 0x24
+CMD_CAL_QUERY = 0x25
+CMD_CAL_ERASE = 0x26
+CMD_ACK      = 0x80
+CMD_NACK     = 0xE0
 
 DIR_STOP    = 0
 DIR_FORWARD = 1
@@ -164,13 +171,13 @@ class RcDashboard:
         self.root = root
         self.root.title("RC Car Telemetry Dashboard")
         self.root.configure(bg=BG)
-        self.root.geometry("1400x920")
-        self.root.minsize(1200, 800)
+        self.root.geometry("1400x1050")
+        self.root.minsize(1200, 950)
 
         self.ser        = None
         self.connected  = False
         self.active_key = None
-        self.speed      = 5
+        self.speed      = 10
         self.sending    = False
 
         # BLE
@@ -183,12 +190,14 @@ class RcDashboard:
                          daemon=True, name="ble-loop").start()
 
         self.ir_left  = 0; self.ir_right = 0; self.us_dist = 0
+        self.bat_mv   = 0
         self.roll = 0.0;   self.pitch = 0.0;  self.yaw = 0.0
         self.rx_count = 0
 
         self.left_hist  = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
         self.right_hist = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
         self.us_hist    = deque([0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
+        self.bat_hist   = deque([0.0]*HISTORY_SIZE, maxlen=HISTORY_SIZE)
 
         self._build_ui()
         self._bind_keys()
@@ -206,6 +215,7 @@ class RcDashboard:
         self._build_controller(top_row)
         self._build_3d_view(top_row)
         self._build_sensor_panel(top_row)
+        self._build_cal_panel(main)
         self._build_chart(main)
 
     def _build_topbar(self):
@@ -270,106 +280,96 @@ class RcDashboard:
 
     # ── Controller ───────────────────────────────────────────────
     def _build_controller(self, parent):
-        f = tk.Frame(parent, bg=CARD_BG, width=280,
+        f = tk.Frame(parent, bg=CARD_BG, width=240,
                      highlightbackground="#1e1e3a", highlightthickness=1)
         f.pack(side=tk.LEFT, fill=tk.Y, padx=(0,4), pady=4)
         f.pack_propagate(False)
 
-        tk.Label(f, text="CONTROL", bg=CARD_BG, fg=ACCENT,
-                 font=("Consolas", 11, "bold")).pack(pady=(12,4))
-
+        # Command status
         self._lbl_cmd = tk.Label(f, text="STANDBY", bg=CARD_BG, fg=FG_DIM,
-                                  font=("Consolas", 18, "bold"))
-        self._lbl_cmd.pack(pady=(8,12))
+                                  font=("Consolas", 14, "bold"))
+        self._lbl_cmd.pack(pady=(8,4))
 
-        # D-pad
+        # D-pad (compact)
         grid = tk.Frame(f, bg=CARD_BG)
         grid.pack()
-        btn_cfg = dict(width=5, height=2, relief=tk.FLAT,
-                       font=("Consolas", 16, "bold"), cursor="hand2",
+        btn_cfg = dict(width=4, height=1, relief=tk.FLAT,
+                       font=("Consolas", 14, "bold"), cursor="hand2",
                        activebackground="#2a2a50")
 
-        tk.Label(grid, bg=CARD_BG, width=5).grid(row=0, column=0)
+        tk.Label(grid, bg=CARD_BG, width=4).grid(row=0, column=0)
         self._btn_up = tk.Button(grid, text="W", bg="#1a1a30", fg=FG, **btn_cfg)
-        self._btn_up.grid(row=0, column=1, padx=2, pady=2)
+        self._btn_up.grid(row=0, column=1, padx=2, pady=1)
 
         self._btn_left = tk.Button(grid, text="A", bg="#1a1a30", fg=FG, **btn_cfg)
-        self._btn_left.grid(row=1, column=0, padx=2, pady=2)
+        self._btn_left.grid(row=1, column=0, padx=2, pady=1)
         self._btn_stop = tk.Button(grid, text="■", bg="#1a0a10", fg=DANGER, **btn_cfg,
                                     command=self._send_stop)
-        self._btn_stop.grid(row=1, column=1, padx=2, pady=2)
+        self._btn_stop.grid(row=1, column=1, padx=2, pady=1)
         self._btn_right = tk.Button(grid, text="D", bg="#1a1a30", fg=FG, **btn_cfg)
-        self._btn_right.grid(row=1, column=2, padx=2, pady=2)
+        self._btn_right.grid(row=1, column=2, padx=2, pady=1)
 
         self._btn_down = tk.Button(grid, text="S", bg="#1a1a30", fg=FG, **btn_cfg)
-        self._btn_down.grid(row=2, column=1, padx=2, pady=2)
+        self._btn_down.grid(row=2, column=1, padx=2, pady=1)
 
         self._dpad_btns = {
             'Up': self._btn_up, 'Down': self._btn_down,
             'Left': self._btn_left, 'Right': self._btn_right,
         }
 
-        # Mouse press/release on D-pad buttons
         for d, btn in self._dpad_btns.items():
             btn.bind('<ButtonPress-1>',   lambda e, k=d: self._key_press(k))
             btn.bind('<ButtonRelease-1>', lambda e, k=d: self._key_release(k))
 
-        # Speed
-        tk.Label(f, text="THROTTLE", bg=CARD_BG, fg=FG_DIM,
-                 font=("Consolas", 9)).pack(pady=(20,4))
-
+        # Speed (compact)
         self._lbl_speed = tk.Label(f, text=f"{self.speed*10}%", bg=CARD_BG, fg=ACCENT,
-                                    font=("Consolas", 28, "bold"))
-        self._lbl_speed.pack()
+                                    font=("Consolas", 22, "bold"))
+        self._lbl_speed.pack(pady=(6,2))
 
         spd_frm = tk.Frame(f, bg=CARD_BG)
-        spd_frm.pack(pady=6)
+        spd_frm.pack()
         self._speed_btns = {}
-        for i in range(1, 10):
+        for i in range(1, 11):
             active = (i == self.speed)
             btn = tk.Button(spd_frm, text=str(i), width=2,
                             bg=ACCENT if active else "#1a1a30",
                             fg=BG if active else FG_DIM,
-                            relief=tk.FLAT, font=("Consolas", 9, "bold"),
+                            relief=tk.FLAT, font=("Consolas", 8, "bold"),
                             cursor="hand2", command=lambda n=i: self._set_speed(n))
             btn.pack(side=tk.LEFT, padx=1)
             self._speed_btns[i] = btn
 
-        self._speed_bar = tk.Canvas(f, height=8, bg="#0a0a14", highlightthickness=0)
-        self._speed_bar.pack(fill=tk.X, padx=30, pady=(4,0))
+        self._speed_bar = tk.Canvas(f, height=6, bg="#0a0a14", highlightthickness=0)
+        self._speed_bar.pack(fill=tk.X, padx=20, pady=(2,0))
         self._draw_speed_bar()
 
-        # ── Protocol Controls ────────────────────────────────────
-        tk.Frame(f, bg="#1e1e3a", height=1).pack(fill=tk.X, padx=12, pady=(14,8))
+        # ── Mode + PING + ACK (compact row) ──────────────────────
+        tk.Frame(f, bg="#1e1e3a", height=1).pack(fill=tk.X, padx=8, pady=(8,4))
 
-        # Mode selector
         mode_row = tk.Frame(f, bg=CARD_BG)
-        mode_row.pack(pady=(0,6))
+        mode_row.pack(fill=tk.X, padx=8)
         tk.Label(mode_row, text="MODE", bg=CARD_BG, fg=FG_DIM,
-                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0,6))
-        self._mode_combo = ttk.Combobox(mode_row, width=13, state="readonly",
-                                         font=("Consolas", 9))
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        self._mode_combo = ttk.Combobox(mode_row, width=11, state="readonly",
+                                         font=("Consolas", 8))
         self._mode_combo["values"] = ["MANUAL", "CALIBRATION", "AUTO"]
         self._mode_combo.current(0)
-        self._mode_combo.pack(side=tk.LEFT)
+        self._mode_combo.pack(side=tk.LEFT, padx=4)
         self._mode_combo.bind("<<ComboboxSelected>>", self._on_mode_change)
 
-        # PING button
-        self._btn_ping = tk.Button(f, text="PING", width=10,
+        ping_row = tk.Frame(f, bg=CARD_BG)
+        ping_row.pack(fill=tk.X, padx=8, pady=(4,0))
+        self._btn_ping = tk.Button(ping_row, text="PING", width=6,
                                     bg="#1a2040", fg=ACCENT2, relief=tk.FLAT,
-                                    font=("Consolas", 9, "bold"), cursor="hand2",
+                                    font=("Consolas", 8, "bold"), cursor="hand2",
                                     command=self._send_ping)
-        self._btn_ping.pack(pady=(4,4))
+        self._btn_ping.pack(side=tk.LEFT)
+        self._lbl_ack = tk.Label(ping_row, text="---", bg=CARD_BG, fg=FG_DIM,
+                                   font=("Consolas", 10, "bold"))
+        self._lbl_ack.pack(side=tk.LEFT, padx=6)
 
-        # ACK / NACK status
-        tk.Label(f, text="LAST RESPONSE", bg=CARD_BG, fg=FG_DIM,
-                 font=("Consolas", 8)).pack()
-        self._lbl_ack = tk.Label(f, text="---", bg=CARD_BG, fg=FG_DIM,
-                                   font=("Consolas", 12, "bold"))
-        self._lbl_ack.pack(pady=(2,0))
-
-        tk.Label(f, text="WASD / 1~9 / Space=Stop", bg=CARD_BG, fg=FG_DIM,
-                 font=("Consolas", 8)).pack(side=tk.BOTTOM, pady=10)
+        tk.Label(f, text="WASD / 1~0 / Space", bg=CARD_BG, fg=FG_DIM,
+                 font=("Consolas", 7)).pack(side=tk.BOTTOM, pady=4)
 
     # ── 3D Attitude View ─────────────────────────────────────────
     def _build_3d_view(self, parent):
@@ -452,13 +452,226 @@ class RcDashboard:
                                       font=("Consolas", 10))
         self._lbl_ir_r_cm.pack(pady=(0,4))
 
+        # ── Battery Voltage Card (compact) ───────────────────
+        bat_card = tk.Frame(f, bg="#0a0a18", highlightbackground="#3a3a1a",
+                            highlightthickness=1)
+        bat_card.pack(fill=tk.X, padx=12, pady=(8,0))
+
+        bat_top = tk.Frame(bat_card, bg="#0a0a18")
+        bat_top.pack(fill=tk.X, padx=8, pady=(4,0))
+        tk.Label(bat_top, text="BAT", bg="#0a0a18", fg=ACCENT_Y,
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        self._lbl_bat_v = tk.Label(bat_top, text="-.--V", bg="#0a0a18", fg=ACCENT_Y,
+                                    font=("Consolas", 18, "bold"))
+        self._lbl_bat_v.pack(side=tk.LEFT, padx=(4,0))
+        self._lbl_bat_mv = tk.Label(bat_top, text="0mV", bg="#0a0a18", fg=FG_DIM,
+                                     font=("Consolas", 8))
+        self._lbl_bat_mv.pack(side=tk.RIGHT)
+
+        self._bat_bar2 = tk.Canvas(bat_card, height=6, bg="#060612", highlightthickness=0)
+        self._bat_bar2.pack(fill=tk.X, padx=8, pady=(2,4))
+        self._bat_min = 99999
+        self._bat_max = 0
+
+    # ── Calibration Panel ──────────────────────────────────────
+    def _build_cal_panel(self, parent):
+        f = tk.Frame(parent, bg=CARD_BG,
+                     highlightbackground="#1e1e3a", highlightthickness=1)
+        f.pack(fill=tk.X, pady=(4,0))
+
+        inner = tk.Frame(f, bg=CARD_BG)
+        inner.pack(fill=tk.X, padx=8, pady=4)
+
+        # Title + LIVE toggle
+        tk.Label(inner, text="CAL", bg=CARD_BG, fg=ACCENT_Y,
+                 font=("Consolas", 9, "bold")).pack(side=tk.LEFT, padx=(0,4))
+        self._cal_live = tk.BooleanVar(value=False)
+        tk.Checkbutton(inner, text="LIVE", variable=self._cal_live,
+                       bg=CARD_BG, fg=ACCENT, selectcolor="#0a0a18",
+                       activebackground=CARD_BG, activeforeground=ACCENT,
+                       font=("Consolas", 8, "bold"), indicatoron=True,
+                       command=self._on_live_toggle).pack(side=tk.LEFT, padx=(0,8))
+
+        # Helper: build [label - val +] inline widget
+        def make_adj(parent, label, init, var_dict, lbl_dict, adjust_fn):
+            grp = tk.Frame(parent, bg=CARD_BG)
+            grp.pack(side=tk.LEFT, padx=(0,3))
+            tk.Label(grp, text=label, bg=CARD_BG, fg=FG_DIM,
+                     font=("Consolas", 7)).pack(side=tk.LEFT)
+            tk.Button(grp, text="-", width=1, bg="#1a1a30", fg=DANGER,
+                      relief=tk.FLAT, font=("Consolas", 8, "bold"), cursor="hand2",
+                      command=lambda: adjust_fn(label, -1)).pack(side=tk.LEFT)
+            var = tk.IntVar(value=init)
+            lbl = tk.Label(grp, text=str(init), bg="#0a0a18", fg=FG,
+                           font=("Consolas", 11, "bold"), width=3)
+            lbl.pack(side=tk.LEFT, padx=1)
+            tk.Button(grp, text="+", width=1, bg="#1a1a30", fg=ACCENT,
+                      relief=tk.FLAT, font=("Consolas", 8, "bold"), cursor="hand2",
+                      command=lambda: adjust_fn(label, +1)).pack(side=tk.LEFT)
+            var_dict[label] = var
+            lbl_dict[label] = lbl
+
+        # Motor Duty: FL FR RL RR
+        self._cal_duty_vars = {}
+        self._cal_duty_lbls = {}
+        for m in ["FL", "FR", "RL", "RR"]:
+            make_adj(inner, m, 70, self._cal_duty_vars, self._cal_duty_lbls,
+                     self._cal_adjust)
+
+        # Separator
+        tk.Label(inner, text="|", bg=CARD_BG, fg=FG_DIM,
+                 font=("Consolas", 10)).pack(side=tk.LEFT, padx=4)
+
+        # Turn Factor: FRONT REAR
+        self._cal_turn_vars = {}
+        self._cal_turn_lbls = {}
+        for t in ["FT", "RT"]:
+            make_adj(inner, t, 100, self._cal_turn_vars, self._cal_turn_lbls,
+                     self._cal_turn_adjust)
+
+        # Separator
+        tk.Label(inner, text="|", bg=CARD_BG, fg=FG_DIM,
+                 font=("Consolas", 10)).pack(side=tk.LEFT, padx=4)
+
+        # Battery Multiplier
+        bat_grp = tk.Frame(inner, bg=CARD_BG)
+        bat_grp.pack(side=tk.LEFT, padx=(0,6))
+        tk.Label(bat_grp, text="BAT", bg=CARD_BG, fg=FG_DIM,
+                 font=("Consolas", 7)).pack(side=tk.LEFT)
+        self._cal_bat_var = tk.IntVar(value=2000)
+        tk.Spinbox(bat_grp, from_=1000, to=4000, width=5, increment=10,
+                   textvariable=self._cal_bat_var, font=("Consolas", 9),
+                   bg="#0a0a18", fg=FG, buttonbackground="#1a1a30",
+                   highlightthickness=0, relief=tk.FLAT).pack(side=tk.LEFT, padx=2)
+
+        # Buttons: SEND SAVE LOAD
+        btn_cfg = dict(width=5, relief=tk.FLAT, font=("Consolas", 8, "bold"), cursor="hand2")
+        tk.Button(inner, text="SEND", bg="#1a2040", fg=ACCENT2,
+                  command=self._cal_send_all, **btn_cfg).pack(side=tk.LEFT, padx=1)
+        tk.Button(inner, text="SAVE", bg="#1a2040", fg=ACCENT,
+                  command=self._cal_save, **btn_cfg).pack(side=tk.LEFT, padx=1)
+        tk.Button(inner, text="LOAD", bg="#1a2040", fg=WARN,
+                  command=self._cal_load, **btn_cfg).pack(side=tk.LEFT, padx=1)
+        tk.Button(inner, text="ERASE", bg="#1a2040", fg=DANGER,
+                  command=self._cal_erase, **btn_cfg).pack(side=tk.LEFT, padx=1)
+
+        # ── MCU RAM 현재 값 표시 ─────────────────────────────
+        mcu_row = tk.Frame(f, bg=CARD_BG)
+        mcu_row.pack(fill=tk.X, padx=8, pady=(2,4))
+
+        tk.Label(mcu_row, text="MCU RAM", bg=CARD_BG, fg=FG_DIM,
+                 font=("Consolas", 7, "bold")).pack(side=tk.LEFT, padx=(0,6))
+
+        self._mcu_ram_lbls = {}
+        for name in ["FL", "FR", "RL", "RR", "FT", "RT", "BAT"]:
+            tk.Label(mcu_row, text=f"{name}:", bg=CARD_BG, fg=FG_DIM,
+                     font=("Consolas", 7)).pack(side=tk.LEFT)
+            lbl = tk.Label(mcu_row, text="--", bg=CARD_BG, fg=ACCENT2,
+                           font=("Consolas", 9, "bold"))
+            lbl.pack(side=tk.LEFT, padx=(0,6))
+            self._mcu_ram_lbls[name] = lbl
+
+    def _cal_adjust(self, motor, delta):
+        """Adjust motor duty by delta, update label, auto-send if LIVE."""
+        var = self._cal_duty_vars[motor]
+        val = max(0, min(100, var.get() + delta))
+        var.set(val)
+        self._cal_duty_lbls[motor].configure(text=str(val))
+        if self._cal_live.get():
+            self._cal_send_duty()
+
+    def _cal_turn_adjust(self, which, delta):
+        """Adjust turn factor by delta, update label, auto-send if LIVE."""
+        var = self._cal_turn_vars[which]
+        val = max(0, min(100, var.get() + delta))
+        var.set(val)
+        self._cal_turn_lbls[which].configure(text=str(val))
+        if self._cal_live.get():
+            self._cal_send_turn()
+
+    def _on_live_toggle(self):
+        """When LIVE is enabled, send current values immediately."""
+        if self._cal_live.get():
+            self._cal_send_duty()
+            self._cal_send_turn()
+
+    def _cal_send_duty(self):
+        """Send motor duty values to MCU."""
+        fl = self._cal_duty_vars["FL"].get()
+        fr = self._cal_duty_vars["FR"].get()
+        rl = self._cal_duty_vars["RL"].get()
+        rr = self._cal_duty_vars["RR"].get()
+        self._write_packet(build_packet(CMD_CAL_DUTY, bytes([fl, fr, rl, rr])))
+
+    def _cal_send_turn(self):
+        """Send turn factor values to MCU."""
+        front = self._cal_turn_vars["FT"].get()
+        rear  = self._cal_turn_vars["RT"].get()
+        self._write_packet(build_packet(CMD_CAL_TURN, bytes([front, rear])))
+
+    def _cal_send_all(self):
+        """Send all calibration values to MCU RAM (staggered to avoid UART collision)."""
+        self._cal_send_duty()
+        self.root.after(100, self._cal_send_turn)
+        self.root.after(200, self._cal_send_bat)
+        self.root.after(400, self._cal_query)
+
+    def _cal_send_bat(self):
+        """Send battery multiplier to MCU."""
+        mul = self._cal_bat_var.get()
+        self._write_packet(build_packet(CMD_CAL_BAT, bytes([(mul >> 8) & 0xFF, mul & 0xFF])))
+
+    def _cal_save(self):
+        """Save RAM calibration to DFLASH (1s debounce)."""
+        if getattr(self, '_save_locked', False):
+            return
+        self._save_locked = True
+        self._write_packet(build_packet(CMD_CAL_SAVE))
+        self.root.after(500, self._cal_query)
+        self.root.after(1500, lambda: setattr(self, '_save_locked', False))
+
+    def _cal_load(self):
+        """Load calibration from DFLASH to RAM, then query values."""
+        self._write_packet(build_packet(CMD_CAL_LOAD))
+        self.root.after(200, self._cal_query)
+
+    def _cal_erase(self):
+        """Erase DFLASH Sector 0 (calibration data cleared)."""
+        self._write_packet(build_packet(CMD_CAL_ERASE))
+
+    def _cal_query(self):
+        """Request current calibration values from MCU."""
+        self._write_packet(build_packet(CMD_CAL_QUERY))
+
+    def _cal_update_ui(self, vals):
+        """Update calibration UI from MCU response: [FL,FR,RL,RR,FT,RT,BAT]"""
+        try:
+            motors = {"FL": int(vals[0]), "FR": int(vals[1]),
+                      "RL": int(vals[2]), "RR": int(vals[3])}
+            for k, v in motors.items():
+                self._cal_duty_vars[k].set(v)
+                self._cal_duty_lbls[k].configure(text=str(v))
+                self._mcu_ram_lbls[k].configure(text=str(v))
+
+            turns = {"FT": int(vals[4]), "RT": int(vals[5])}
+            for k, v in turns.items():
+                self._cal_turn_vars[k].set(v)
+                self._cal_turn_lbls[k].configure(text=str(v))
+                self._mcu_ram_lbls[k].configure(text=str(v))
+
+            bat = int(vals[6])
+            self._cal_bat_var.set(bat)
+            self._mcu_ram_lbls["BAT"].configure(text=str(bat))
+        except Exception:
+            pass
+
     # ── Chart ────────────────────────────────────────────────────
     def _build_chart(self, parent):
-        f = tk.Frame(parent, bg=CARD_BG, height=180,
+        f = tk.Frame(parent, bg=CARD_BG, height=140,
                      highlightbackground="#1e1e3a", highlightthickness=1)
         f.pack(fill=tk.X, pady=(4,0))
         f.pack_propagate(False)
-        self.fig_chart = Figure(figsize=(10,1.6), dpi=100, facecolor=CHART_BG)
+        self.fig_chart = Figure(figsize=(10,1.2), dpi=100, facecolor=CHART_BG)
         self.ax_chart  = self.fig_chart.add_subplot(111)
         self._setup_chart()
         self.canvas_chart = FigureCanvasTkAgg(self.fig_chart, master=f)
@@ -478,8 +691,21 @@ class RcDashboard:
         self.ln_l, = ax.plot([], [], color=ACCENT_L, lw=1.2, label="IR L", alpha=0.85)
         self.ln_r, = ax.plot([], [], color=ACCENT_R, lw=1.2, label="IR R", alpha=0.85)
         self.ln_u, = ax.plot([], [], color=ACCENT_U, lw=2.0, label="US",   alpha=0.9)
-        ax.legend(loc="upper right", facecolor=CHART_BG, edgecolor=GRID_CLR,
-                  labelcolor=FG_DIM, fontsize=7)
+
+        # Battery voltage — right Y axis
+        self.ax_bat = ax.twinx()
+        self.ax_bat.set_ylabel("V (battery)", color=ACCENT_Y, fontsize=8)
+        self.ax_bat.set_ylim(5.5, 9.0)
+        self.ax_bat.tick_params(colors=ACCENT_Y, labelsize=7)
+        self.ax_bat.spines["right"].set_color(ACCENT_Y)
+        self.ax_bat.axhline(y=6.8, color=DANGER, alpha=0.4, linestyle="--", linewidth=1.0)
+        self.ln_bat, = self.ax_bat.plot([], [], color=ACCENT_Y, lw=2.0, label="BAT", alpha=0.9)
+
+        # Combined legend
+        lines = [self.ln_l, self.ln_r, self.ln_u, self.ln_bat]
+        labels = [l.get_label() for l in lines]
+        ax.legend(lines, labels, loc="upper right", facecolor=CHART_BG,
+                  edgecolor=GRID_CLR, labelcolor=FG_DIM, fontsize=7)
         self.fig_chart.tight_layout(pad=1.5)
 
     # ════════════════════════════════════════════════════════════════
@@ -519,6 +745,20 @@ class RcDashboard:
         self._lbl_pitch.configure(text=f"{self.pitch:+07.1f}")
         self._lbl_yaw.configure(text=f"{self.yaw:+07.1f}")
 
+        # Battery
+        bat_v = self.bat_mv / 1000.0
+        bat_color = DANGER if bat_v < 6.8 else (WARN if bat_v < 7.2 else ACCENT_Y)
+        bat_ratio = max(0.0, min(1.0, (bat_v - 6.0) / 2.4))
+
+        # Battery — sensor panel card
+        self._lbl_bat_v.configure(text=f"{bat_v:.2f}V", fg=bat_color)
+        self._lbl_bat_mv.configure(text=f"{self.bat_mv}mV")
+        self._draw_bar(self._bat_bar2, bat_ratio * 100, 100, bat_color)
+
+        # Battery — chart history
+        self.bat_hist.append(bat_v)
+        self.ln_bat.set_data(x, list(self.bat_hist))
+
         self._draw_3d()
         self._draw_car_top(ld, rd, ud)
         self._rx_var.set(f"RX:{self.rx_count}")
@@ -544,7 +784,7 @@ class RcDashboard:
         w = c.winfo_width()
         h = c.winfo_height()
         if w <= 1: return
-        ratio = self.speed / 9.0
+        ratio = self.speed / 10.0
         bw = int(w * ratio)
         c.create_rectangle(0,0,w,h, fill="#0a0a14", outline="")
         if bw > 0:
@@ -650,6 +890,7 @@ class RcDashboard:
             self.root.bind(f'<KeyRelease-{k}>', lambda e, d=direction: self._key_release(d))
         for i in range(1, 10):
             self.root.bind(str(i), lambda e, n=i: self._set_speed(n))
+        self.root.bind('0', lambda e: self._set_speed(10))
         self.root.bind('<Escape>', lambda e: self.on_close())
         self.root.bind('<space>',  lambda e: self._send_stop())
 
@@ -722,7 +963,7 @@ class RcDashboard:
                 btn.configure(bg="#1a1a30", fg=FG)
 
     def _set_speed(self, n):
-        n = max(1, min(9, n))
+        n = max(1, min(10, n))
         self.speed = n
         for i, btn in self._speed_btns.items():
             btn.configure(bg=ACCENT if i==n else "#1a1a30",
@@ -819,6 +1060,7 @@ class RcDashboard:
         self._ble_combo.configure(state="disabled")
         self._btn_ble_scan.configure(state="disabled")
         self.root.focus_set()
+        self.root.after(500, self._cal_query)
 
     async def _ble_disconnect_async(self):
         if self.ble_client:
@@ -884,6 +1126,8 @@ class RcDashboard:
         self._baud_combo.configure(state="disabled")
         self.root.focus_set()
         threading.Thread(target=self._read_serial, daemon=True).start()
+        # 연결 후 현재 캘리브레이션 값 요청
+        self.root.after(500, self._cal_query)
 
     def _connect_ble(self):
         sel = self._ble_combo.get().strip()
@@ -998,13 +1242,16 @@ class RcDashboard:
 
     def _handle_text_line(self, line):
         """Parse sensor or IMU text lines."""
-        # Sensor: "L:xxxx,R:xxxx,U:xxx"
+        # Sensor: "L:xxxx,R:xxxx,U:xxx,B:xxxx"
         if line.startswith("L:") and ",R:" in line and ",U:" in line:
             try:
                 parts = line.split(",")
                 self.ir_left  = int(parts[0][2:])
                 self.ir_right = int(parts[1][2:])
                 self.us_dist  = int(parts[2][2:])
+                for p in parts:
+                    if p.startswith("B:"):
+                        self.bat_mv = int(p[2:])
                 self.rx_count += 1
             except Exception:
                 pass
@@ -1016,6 +1263,14 @@ class RcDashboard:
                 self.pitch = float(parts[1][2:])
                 self.yaw   = float(parts[2][2:])
                 self.rx_count += 1
+            except Exception:
+                pass
+        # Calibration: "CAL:FL,FR,RL,RR,FT,RT,BATMUL"
+        elif line.startswith("CAL:"):
+            try:
+                vals = line[4:].split(",")
+                if len(vals) >= 7:
+                    self.root.after(0, lambda v=vals: self._cal_update_ui(v))
             except Exception:
                 pass
 

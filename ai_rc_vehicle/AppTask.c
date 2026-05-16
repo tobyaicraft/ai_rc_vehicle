@@ -21,13 +21,36 @@
 #include "DrvUltrasonic.h"
 #include "DrvMpu9250.h"
 #include "DrvGtmTimer.h"
+#include "DrvBuzzer.h"
 #include "AppVehicle.h"
 #include "AppProtocol.h"
 
 /******************************************************************************/
 /*                           Module Variables                                 */
 /******************************************************************************/
-#define MOVE_TIMEOUT_MS  200u   /* MOVE 미수신 시 정지까지 시간 */
+#define MOVE_TIMEOUT_MS     200u    /* MOVE 미수신 시 정지까지 시간 */
+#define BAT_LOW_THRESHOLD   6800u   /* 저전압 경고 임계값 (mV) */
+
+/* 저전압 경고 멜로디 (주파수Hz, 0=무음)
+ * 100ms 단위로 한 음씩 재생, 끝나면 반복
+ * ♪ Super Mario Bros Theme                                    */
+static const uint16 s_lowBatMelody[] = {
+    /* E5 E5 . E5 . C5 E5 . G5 . . . G4 . . .   */
+    659, 659, 0, 659, 0, 523, 659, 0,
+    784, 0, 0, 0, 392, 0, 0, 0,
+    /* C5 . . G4 . . E4 . . A4 . B4 . Bb4 A4 . */
+    523, 0, 0, 392, 0, 0, 330, 0,
+    0, 440, 0, 494, 0, 466, 440, 0,
+    /* G4 E5 . G5 A5 . F5 G5 . E5 . C5 D5 B4 . */
+    392, 659, 0, 784, 880, 0, 698, 784,
+    0, 659, 0, 523, 587, 494, 0, 0,
+    /* pause 2s */
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+};
+#define MELODY_LEN  (sizeof(s_lowBatMelody) / sizeof(s_lowBatMelody[0]))
+
+static uint8 s_melodyIdx = 0u;
 
 /******************************************************************************/
 /*                           1ms Task                                         */
@@ -99,22 +122,43 @@ void AppTask_100ms(void)
 
     DrvUltrasonic_Trigger();
 
-    {
-        uint16 irLeft  = DrvAdc_GetIrLeft();
-        uint16 irRight = DrvAdc_GetIrRight();
-        uint16 usDist  = (uint16)DrvUltrasonic_GetDistanceCm();
-        char str[8];
+    uint16 irLeft  = DrvAdc_GetIrLeft();
+    uint16 irRight = DrvAdc_GetIrRight();
+    uint16 usDist  = (uint16)DrvUltrasonic_GetDistanceCm();
+    uint16 batMv   = DrvAdc_GetBatteryMv();
+    char str[8];
 
-        DrvUart_SendString("L:");
-        Uint16ToStr(irLeft, str);
-        DrvUart_SendString(str);
-        DrvUart_SendString(",R:");
-        Uint16ToStr(irRight, str);
-        DrvUart_SendString(str);
-        DrvUart_SendString(",U:");
-        Uint16ToStr(usDist, str);
-        DrvUart_SendString(str);
-        DrvUart_SendString("\r\n");
+    DrvUart_SendString("L:");
+    Uint16ToStr(irLeft, str);
+    DrvUart_SendString(str);
+    DrvUart_SendString(",R:");
+    Uint16ToStr(irRight, str);
+    DrvUart_SendString(str);
+    DrvUart_SendString(",U:");
+    Uint16ToStr(usDist, str);
+    DrvUart_SendString(str);
+    DrvUart_SendString(",B:");
+    Uint16ToStr(batMv, str);
+    DrvUart_SendString(str);
+    DrvUart_SendString("\r\n");
+
+    /* 저전압 경고 멜로디 재생 */
+    if ((batMv > 0u) && (batMv < BAT_LOW_THRESHOLD))
+    {
+        uint16 note = s_lowBatMelody[s_melodyIdx];
+        if (note > 0u)
+            DrvBuzzer_PlayNote(note);
+        else
+            DrvBuzzer_Off();
+
+        s_melodyIdx++;
+        if (s_melodyIdx >= MELODY_LEN)
+            s_melodyIdx = 0u;
+    }
+    else
+    {
+        DrvBuzzer_Off();
+        s_melodyIdx = 0u;
     }
 
     DrvMpu9250_SendUart();
