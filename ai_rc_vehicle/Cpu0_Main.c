@@ -34,13 +34,13 @@ void core0_main(void)
     DrvIntc_Init();
     DrvDio_Init();
     DrvGtmTimer_Init();     /* GTM Enable + FXCLK + TOM0_Ch15 (1ms tick) */
-    DrvPwm_Init();          /* TOM0_Ch0/1/6/13 (모터 PWM 100Hz) */
+    DrvBuzzer_Init();       /* TOM0_Ch10 P02.2 (반드시 DrvPwm 전에 — enableClocks 전) */
+    DrvPwm_Init();          /* TOM0_Ch0/1/6/13 (모터 PWM 100Hz) + FXCLK 활성화 */
     DrvUart_Init();         /* ASCLIN0 9600 (HC-12) */
     DrvUart1_Init();        /* ASCLIN1 9600 (HC-10 BLE) */
     DrvAdc_Init();          /* VADC IR sensors (AN1, AN12) */
     DrvUltrasonic_Init();   /* HC-SR04 (Trig=P02.6 GPIO, Echo=P02.7 TIM0_7) */
     DrvSpi_Init();          /* QSPI3 SPI Master (MPU-9250) */
-    DrvBuzzer_Init();       /* TOM0_Ch10 P02.2 (passive buzzer 2kHz) */
 
     DrvMotor_Init();
     AppVehicle_Init();
