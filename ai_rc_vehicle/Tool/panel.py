@@ -69,11 +69,13 @@ CMD_CAL_ERASE = 0x26
 CMD_ACK      = 0x80
 CMD_NACK     = 0xE0
 
-DIR_STOP    = 0
-DIR_FORWARD = 1
-DIR_REVERSE = 2
-DIR_LEFT    = 3
-DIR_RIGHT   = 4
+DIR_STOP      = 0
+DIR_FORWARD   = 1
+DIR_REVERSE   = 2
+DIR_LEFT      = 3
+DIR_RIGHT     = 4
+DIR_TURN90_L  = 5
+DIR_TURN90_R  = 6
 
 PROTO_MAX_PKT_LEN = 9   # CMD(1) + PAYLOAD(8) max
 
@@ -190,7 +192,7 @@ class RcDashboard:
                          daemon=True, name="ble-loop").start()
 
         self.ir_left  = 0; self.ir_right = 0; self.us_dist = 0
-        self.bat_mv   = 0
+        self.bat_mv   = 0; self.obstacle = 0
         self.roll = 0.0;   self.pitch = 0.0;  self.yaw = 0.0
         self.rx_count = 0
 
@@ -377,29 +379,47 @@ class RcDashboard:
                      highlightbackground="#1e1e3a", highlightthickness=1)
         f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        tk.Label(f, text="3D ATTITUDE", bg=CARD_BG, fg=ACCENT2,
-                 font=("Consolas", 11, "bold")).pack(pady=(8,0))
+        # ── 상단: 3D + 자세 값 (축소) ───────────────────────
+        top = tk.Frame(f, bg=CARD_BG)
+        top.pack(fill=tk.BOTH, expand=True)
 
-        att_frm = tk.Frame(f, bg=CARD_BG)
-        att_frm.pack(pady=(2,0))
+        att_frm = tk.Frame(top, bg=CARD_BG)
+        att_frm.pack(pady=(4,0))
 
-        for label, color, attr in [("ROLL","#5b9aff","_lbl_roll"),
-                                    ("PITCH","#ff9a5b","_lbl_pitch"),
-                                    ("YAW","#ffcc00","_lbl_yaw")]:
-            cell = tk.Frame(att_frm, bg=CARD_BG)
-            cell.pack(side=tk.LEFT, padx=15)
-            tk.Label(cell, text=label, bg=CARD_BG, fg=FG_DIM,
-                     font=("Consolas", 8)).pack()
-            lbl = tk.Label(cell, text="+000.0", bg=CARD_BG, fg=color,
-                           font=("Consolas", 16, "bold"))
-            lbl.pack()
+        tk.Label(att_frm, text="IMU", bg=CARD_BG, fg=ACCENT2,
+                 font=("Consolas", 8, "bold")).pack(side=tk.LEFT, padx=(0,8))
+        for label, color, attr in [("R","#5b9aff","_lbl_roll"),
+                                    ("P","#ff9a5b","_lbl_pitch"),
+                                    ("Y","#ffcc00","_lbl_yaw")]:
+            tk.Label(att_frm, text=label, bg=CARD_BG, fg=FG_DIM,
+                     font=("Consolas", 7)).pack(side=tk.LEFT)
+            lbl = tk.Label(att_frm, text="+000.0", bg=CARD_BG, fg=color,
+                           font=("Consolas", 11, "bold"))
+            lbl.pack(side=tk.LEFT, padx=(0,8))
             setattr(self, attr, lbl)
 
-        self.fig3d = Figure(figsize=(5,4), dpi=100, facecolor='#0a0a14')
+        self.fig3d = Figure(figsize=(4,2.5), dpi=100, facecolor='#0a0a14')
         self.ax3d  = self.fig3d.add_subplot(111, projection='3d')
         self.ax3d.set_facecolor('#0a0a14')
-        self.canvas3d = FigureCanvasTkAgg(self.fig3d, master=f)
-        self.canvas3d.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=6, pady=(2,6))
+        self.canvas3d = FigureCanvasTkAgg(self.fig3d, master=top)
+        self.canvas3d.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=4, pady=(0,2))
+
+        # ── 하단: 장애물 감지 상태 ──────────────────────────
+        obs_frm = tk.Frame(f, bg="#0a0a18", highlightbackground="#1e1e3a",
+                           highlightthickness=1)
+        obs_frm.pack(fill=tk.X, padx=4, pady=(0,4))
+
+        obs_top = tk.Frame(obs_frm, bg="#0a0a18")
+        obs_top.pack(fill=tk.X, padx=8, pady=(4,0))
+        tk.Label(obs_top, text="OBSTACLE", bg="#0a0a18", fg=ACCENT_U,
+                 font=("Consolas", 9, "bold")).pack(side=tk.LEFT)
+        self._lbl_obs_status = tk.Label(obs_top, text="CLEAR", bg="#0a0a18", fg=ACCENT,
+                                         font=("Consolas", 12, "bold"))
+        self._lbl_obs_status.pack(side=tk.RIGHT)
+
+        # 장애물 방향 시각화 캔버스
+        self._obs_canvas = tk.Canvas(obs_frm, bg="#0a0a18", highlightthickness=0, height=80)
+        self._obs_canvas.pack(fill=tk.X, padx=8, pady=(2,6))
 
     # ── Sensor Panel ─────────────────────────────────────────────
     def _build_sensor_panel(self, parent):
@@ -761,6 +781,7 @@ class RcDashboard:
 
         self._draw_3d()
         self._draw_car_top(ld, rd, ud)
+        self._draw_obstacle()
         self._rx_var.set(f"RX:{self.rx_count}")
 
         self.canvas_chart.draw_idle()
@@ -879,6 +900,55 @@ class RcDashboard:
         c.create_line(rx0,ry0, rx1-sp*0.4,ry1-sp*0.4, fill=rc, width=1, arrow=tk.LAST)
         c.create_text(rx1+3, ry1-12, text=f"{rd:.0f}", fill=rc, font=("Consolas",9,"bold"))
 
+    def _draw_obstacle(self):
+        """Draw obstacle detection visualization."""
+        c = self._obs_canvas
+        c.delete("all")
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w <= 1: return
+
+        cx, cy = w // 2, h // 2
+        cw, ch = 30, 45
+
+        # 차체
+        c.create_rectangle(cx-cw//2, cy-ch//2, cx+cw//2, cy+ch//2,
+                           fill="#1a1a30", outline="#2a2a50", width=1)
+
+        obs = self.obstacle
+        OBS_NAMES = {0: "CLEAR", 1: "FRONT", 2: "LEFT", 3: "RIGHT", 4: "BOTH"}
+        OBS_COLORS = {0: ACCENT, 1: DANGER, 2: ACCENT_L, 3: ACCENT_R, 4: DANGER}
+
+        name  = OBS_NAMES.get(obs, "?")
+        color = OBS_COLORS.get(obs, FG_DIM)
+        self._lbl_obs_status.configure(text=name, fg=color)
+
+        # 전방 위험 표시
+        if obs == 1 or obs == 4:   # FRONT or BOTH
+            c.create_rectangle(cx-40, cy-ch//2-20, cx+40, cy-ch//2-2,
+                               fill="", outline=DANGER, width=2)
+            c.create_text(cx, cy-ch//2-12, text="!!", fill=DANGER,
+                          font=("Consolas", 10, "bold"))
+
+        # 좌측 위험
+        if obs == 2 or obs == 4:   # LEFT or BOTH
+            c.create_rectangle(cx-cw//2-30, cy-20, cx-cw//2-2, cy+20,
+                               fill="", outline=ACCENT_L, width=2)
+            c.create_text(cx-cw//2-16, cy, text="!", fill=ACCENT_L,
+                          font=("Consolas", 10, "bold"))
+
+        # 우측 위험
+        if obs == 3 or obs == 4:   # RIGHT or BOTH
+            c.create_rectangle(cx+cw//2+2, cy-20, cx+cw//2+30, cy+20,
+                               fill="", outline=ACCENT_R, width=2)
+            c.create_text(cx+cw//2+16, cy, text="!", fill=ACCENT_R,
+                          font=("Consolas", 10, "bold"))
+
+        # 안전일 때 체크마크
+        if obs == 0:
+            c.create_text(cx, cy-ch//2-12, text="OK", fill=ACCENT,
+                          font=("Consolas", 9, "bold"))
+
     # ════════════════════════════════════════════════════════════════
     # Keys
     # ════════════════════════════════════════════════════════════════
@@ -893,6 +963,11 @@ class RcDashboard:
         self.root.bind('0', lambda e: self._set_speed(10))
         self.root.bind('<Escape>', lambda e: self.on_close())
         self.root.bind('<space>',  lambda e: self._send_stop())
+        # 90도 회전: E=좌회전, R=우회전 (원샷)
+        self.root.bind('<KeyPress-e>', lambda e: self._send_turn90('L'))
+        self.root.bind('<KeyPress-E>', lambda e: self._send_turn90('L'))
+        self.root.bind('<KeyPress-r>', lambda e: self._send_turn90('R'))
+        self.root.bind('<KeyPress-R>', lambda e: self._send_turn90('R'))
 
     def _key_press(self, d):
         if not self.connected or self.active_key == d:
@@ -931,6 +1006,15 @@ class RcDashboard:
         self._update_dpad(None)
         self._lbl_cmd.configure(text="STANDBY", fg=FG_DIM)
         self._write_packet(build_packet(CMD_MOVE, bytes([DIR_STOP, 0])))
+
+    def _send_turn90(self, direction):
+        """Send 90-degree turn command. direction: 'L' or 'R'"""
+        if not self.connected:
+            return
+        d = DIR_TURN90_L if direction == 'L' else DIR_TURN90_R
+        name = "TURN90 L" if direction == 'L' else "TURN90 R"
+        self._write_packet(build_packet(CMD_MOVE, bytes([d, self.speed * 10])))
+        self._lbl_cmd.configure(text=name, fg=ACCENT2)
 
     def _send_ping(self):
         self._write_packet(build_packet(CMD_PING))
@@ -1252,6 +1336,8 @@ class RcDashboard:
                 for p in parts:
                     if p.startswith("B:"):
                         self.bat_mv = int(p[2:])
+                    elif p.startswith("O:"):
+                        self.obstacle = int(p[2:])
                 self.rx_count += 1
             except Exception:
                 pass

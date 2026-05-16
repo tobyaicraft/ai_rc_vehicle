@@ -4,7 +4,21 @@
  *********************************************************************************************************************/
 #include "AppVehicle.h"
 #include "DrvMotor.h"
+#include "DrvAdc.h"
+#include "DrvMpu9250.h"
 #include "DrvFlash.h"
+#include <math.h>
+
+/******************************************************************************/
+/*                           Configuration                                    */
+/******************************************************************************/
+#define BAT_VREF_MV     8400u
+#define BAT_VMIN_MV     6400u
+#define BAT_COMP_MAX    8
+
+#define TURN90_TARGET   90.0f    /* 목표 회전 각도 */
+#define TURN90_MARGIN   3.0f     /* 도달 판정 여유 (±3°) */
+#define TURN90_TIMEOUT  300u     /* 타임아웃 (×10ms = 3초) */
 
 /******************************************************************************/
 /*                           Global Variables                                 */
@@ -13,28 +27,118 @@ volatile uint8   g_vehicleCmd   = VEHICLE_STOP;
 volatile float32 g_vehicleSpeed = 50.0f;
 
 /******************************************************************************/
+/*                           Turn90 State                                     */
+/******************************************************************************/
+static boolean s_turn90Active  = FALSE;
+static sint8   s_turn90Dir     = 0;      /* +1=우회전, -1=좌회전 */
+static float32 s_turn90StartYaw = 0.0f;
+static uint16  s_turn90Counter = 0u;
+
+/******************************************************************************/
+/*                           Static Functions                                 */
+/******************************************************************************/
+
+static sint16 getBatCompensation(void)
+{
+    uint16 batMv = DrvAdc_GetBatteryMv();
+
+    if ((batMv == 0u) || (batMv >= BAT_VREF_MV))
+        return 0;
+    if (batMv <= BAT_VMIN_MV)
+        return BAT_COMP_MAX;
+
+    return (sint16)(((uint32)(BAT_VREF_MV - batMv) * BAT_COMP_MAX)
+                    / (BAT_VREF_MV - BAT_VMIN_MV));
+}
+
+/* Yaw 차이 계산 (-180 ~ +180 범위 정규화) */
+static float32 yawDelta(float32 current, float32 start)
+{
+    float32 d = current - start;
+    if (d >  180.0f) d -= 360.0f;
+    if (d < -180.0f) d += 360.0f;
+    return d;
+}
+
+/******************************************************************************/
 /*                           Functions                                        */
 /******************************************************************************/
 void AppVehicle_Init(void)
 {
     g_vehicleCmd   = VEHICLE_STOP;
-    g_vehicleSpeed = 100.0f;    /* MOVE 명령 스케일 (캘리브레이션 Duty와 곱해짐) */
+    g_vehicleSpeed = 100.0f;
+    s_turn90Active = FALSE;
+}
+
+boolean AppVehicle_IsTurning(void)
+{
+    return s_turn90Active;
 }
 
 void AppVehicle_Update(void)
 {
-    /* 각 모터별 캘리브레이션 Duty × 명령 속도 / 100 */
-    sint16 spdFL = (sint16)((float32)g_calDutyFL * g_vehicleSpeed / 100.0f);
-    sint16 spdFR = (sint16)((float32)g_calDutyFR * g_vehicleSpeed / 100.0f);
-    sint16 spdRL = (sint16)((float32)g_calDutyRL * g_vehicleSpeed / 100.0f);
-    sint16 spdRR = (sint16)((float32)g_calDutyRR * g_vehicleSpeed / 100.0f);
+    sint16 comp = getBatCompensation();
 
-    /* 회전용: 캘리브레이션 Duty × 턴팩터 / 100 × 명령 속도 / 100 */
-    sint16 turnFL = (sint16)((float32)g_calDutyFL * g_calTurnFront / 100.0f * g_vehicleSpeed / 100.0f);
-    sint16 turnFR = (sint16)((float32)g_calDutyFR * g_calTurnFront / 100.0f * g_vehicleSpeed / 100.0f);
-    sint16 turnRL = (sint16)((float32)g_calDutyRL * g_calTurnRear  / 100.0f * g_vehicleSpeed / 100.0f);
-    sint16 turnRR = (sint16)((float32)g_calDutyRR * g_calTurnRear  / 100.0f * g_vehicleSpeed / 100.0f);
+    sint16 spdFL = (sint16)(((float32)g_calDutyFL + comp) * g_vehicleSpeed / 100.0f);
+    sint16 spdFR = (sint16)(((float32)g_calDutyFR + comp) * g_vehicleSpeed / 100.0f);
+    sint16 spdRL = (sint16)(((float32)g_calDutyRL + comp) * g_vehicleSpeed / 100.0f);
+    sint16 spdRR = (sint16)(((float32)g_calDutyRR + comp) * g_vehicleSpeed / 100.0f);
 
+    sint16 turnFL = (sint16)(((float32)g_calDutyFL + comp) * g_calTurnFront / 100.0f * g_vehicleSpeed / 100.0f);
+    sint16 turnFR = (sint16)(((float32)g_calDutyFR + comp) * g_calTurnFront / 100.0f * g_vehicleSpeed / 100.0f);
+    sint16 turnRL = (sint16)(((float32)g_calDutyRL + comp) * g_calTurnRear  / 100.0f * g_vehicleSpeed / 100.0f);
+    sint16 turnRR = (sint16)(((float32)g_calDutyRR + comp) * g_calTurnRear  / 100.0f * g_vehicleSpeed / 100.0f);
+
+    /* ── 90도 회전 상태 머신 ────────────────────────────── */
+    if (s_turn90Active)
+    {
+        float32 delta = yawDelta(DrvMpu9250_GetYaw(), s_turn90StartYaw);
+        float32 absDelta = (delta < 0.0f) ? -delta : delta;
+
+        s_turn90Counter++;
+
+        /* 목표 도달 또는 타임아웃 → 정지 */
+        if ((absDelta >= (TURN90_TARGET - TURN90_MARGIN)) ||
+            (s_turn90Counter >= TURN90_TIMEOUT))
+        {
+            s_turn90Active = FALSE;
+            g_vehicleCmd   = VEHICLE_STOP;
+            DrvMotor_Coast(MOTOR_FL);
+            DrvMotor_Coast(MOTOR_FR);
+            DrvMotor_Coast(MOTOR_RL);
+            DrvMotor_Coast(MOTOR_RR);
+            return;
+        }
+
+        /* 회전 계속 */
+        if (s_turn90Dir > 0)    /* 우회전 */
+        {
+            DrvMotor_SetDuty(MOTOR_FL,  turnFL);
+            DrvMotor_SetDuty(MOTOR_FR, -turnFR);
+            DrvMotor_SetDuty(MOTOR_RL,  turnRL);
+            DrvMotor_SetDuty(MOTOR_RR, -turnRR);
+        }
+        else                    /* 좌회전 */
+        {
+            DrvMotor_SetDuty(MOTOR_FL, -turnFL);
+            DrvMotor_SetDuty(MOTOR_FR,  turnFR);
+            DrvMotor_SetDuty(MOTOR_RL, -turnRL);
+            DrvMotor_SetDuty(MOTOR_RR,  turnRR);
+        }
+        return;
+    }
+
+    /* ── 90도 회전 시작 트리거 ───────────────────────────── */
+    if (g_vehicleCmd == VEHICLE_TURN90_R || g_vehicleCmd == VEHICLE_TURN90_L)
+    {
+        s_turn90Active   = TRUE;
+        s_turn90Dir      = (g_vehicleCmd == VEHICLE_TURN90_R) ? 1 : -1;
+        s_turn90StartYaw = DrvMpu9250_GetYaw();
+        s_turn90Counter  = 0u;
+        return;
+    }
+
+    /* ── 일반 주행 ──────────────────────────────────────── */
     switch ((VehicleCommand)g_vehicleCmd)
     {
     case VEHICLE_FORWARD:

@@ -22,8 +22,10 @@
 #include "DrvMpu9250.h"
 #include "DrvGtmTimer.h"
 #include "DrvBuzzer.h"
+#include "DrvSensorFusion.h"
 #include "AppVehicle.h"
 #include "AppProtocol.h"
+#include "AppObstacle.h"
 
 /******************************************************************************/
 /*                           Module Variables                                 */
@@ -122,10 +124,14 @@ void AppTask_100ms(void)
 
     DrvUltrasonic_Trigger();
 
-    uint16 irLeft  = DrvAdc_GetIrLeft();
-    uint16 irRight = DrvAdc_GetIrRight();
-    uint16 usDist  = (uint16)DrvUltrasonic_GetDistanceCm();
+    /* 센서 필터링 업데이트 (이동 평균 + 이상치 제거) */
+    DrvSensorFusion_Update();
+
+    uint16 irLeft  = DrvSensorFusion_GetIrLeft();
+    uint16 irRight = DrvSensorFusion_GetIrRight();
+    uint16 usDist  = DrvSensorFusion_GetUltrasonic();
     uint16 batMv   = DrvAdc_GetBatteryMv();
+    uint8  obstacle = (uint8)AppObstacle_Detect();
     char str[8];
 
     DrvUart_SendString("L:");
@@ -139,6 +145,9 @@ void AppTask_100ms(void)
     DrvUart_SendString(str);
     DrvUart_SendString(",B:");
     Uint16ToStr(batMv, str);
+    DrvUart_SendString(str);
+    DrvUart_SendString(",O:");
+    Uint16ToStr((uint16)obstacle, str);
     DrvUart_SendString(str);
     DrvUart_SendString("\r\n");
 

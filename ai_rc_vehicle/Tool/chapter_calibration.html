@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>RC Car - 캘리브레이션, 배터리 보상, 저전압 알람</title>
+<style>
+  body { font-family: 'Malgun Gothic', '맑은 고딕', sans-serif; line-height: 1.8; color: #222; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+  h1 { font-size: 22pt; border-bottom: 3px solid #1a5276; padding-bottom: 8px; margin-top: 40px; }
+  h2 { font-size: 16pt; color: #1a5276; border-left: 4px solid #1a5276; padding-left: 12px; margin-top: 32px; }
+  h3 { font-size: 13pt; color: #2c3e50; margin-top: 24px; }
+  p { text-indent: 1em; margin: 8px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 10pt; }
+  th { background: #1a5276; color: white; padding: 8px 12px; text-align: center; }
+  td { border: 1px solid #bdc3c7; padding: 6px 12px; text-align: center; }
+  tr:nth-child(even) { background: #f2f6fa; }
+  code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: Consolas, monospace; font-size: 10pt; }
+  pre { background: #2c3e50; color: #ecf0f1; padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 10pt; line-height: 1.6; }
+  .formula-box { background: #fef9e7; border: 1px solid #f9e79f; border-radius: 6px; padding: 16px; margin: 16px 0; text-align: center; font-size: 12pt; }
+  .note-box { background: #eaf2f8; border-left: 4px solid #2980b9; padding: 12px 16px; margin: 16px 0; font-size: 10pt; }
+  .warn-box { background: #fdedec; border-left: 4px solid #e74c3c; padding: 12px 16px; margin: 16px 0; font-size: 10pt; }
+  .circuit-box { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 16px; margin: 16px 0; font-family: Consolas, monospace; font-size: 10pt; white-space: pre; line-height: 1.5; }
+  .img-caption { text-align: center; font-size: 9pt; color: #7f8c8d; margin-top: 4px; }
+  ol, ul { margin: 8px 0 8px 2em; }
+  li { margin: 4px 0; }
+  .page-break { page-break-before: always; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<h1>1. 배터리 전압 모니터링 (ADC)</h1>
+<!-- ============================================================ -->
+
+<h2>1.1 왜 배터리 전압을 측정해야 하는가</h2>
+<p>RC카에 사용되는 7.4V 리튬이온 배터리(2S)는 만충 시 8.4V, 공칭 7.4V, 방전 한계 약 6.0V의 전압 범위를 가집니다. 주행 중 전압이 지속적으로 하락하면 모터 출력이 감소하고, 과방전 시에는 배터리 수명이 영구적으로 손상됩니다.</p>
+<p>따라서 MCU에서 배터리 전압을 실시간으로 읽어 (1) 전압 보상 제어와 (2) 저전압 경고에 활용합니다.</p>
+
+<h2>1.2 전압 분배 회로 (Voltage Divider)</h2>
+<p>TC237의 ADC 입력 허용 전압은 최대 5V입니다. 리튬이온 배터리 전압(최대 8.4V)을 직접 인가하면 ADC가 손상되므로, 저항 분압 회로를 사용하여 전압을 절반으로 낮춥니다.</p>
+
+<div class="circuit-box">
+  V_battery (7.4V)
+      |
+     R1 = 10kΩ
+      |
+      +---------> TC237 ADC (AN0, P40.0)
+      |
+     R2 = 10kΩ
+      |
+     GND
+</div>
+
+<div class="formula-box">
+  <b>V<sub>adc</sub> = V<sub>battery</sub> &times; R2 / (R1 + R2) = V<sub>battery</sub> &times; 0.5</b><br>
+  V<sub>battery</sub> = 8.4V &rarr; V<sub>adc</sub> = 4.2V (ADC 안전 범위 이내)
+</div>
+
+<h2>1.3 ADC 값에서 실제 전압으로 변환</h2>
+<p>TC237 VADC는 12비트 분해능(0~4095)을 가지며, 기준 전압(V<sub>ref</sub>)은 5.0V입니다. ADC raw 값에서 실제 배터리 전압을 구하는 수식은 다음과 같습니다:</p>
+
+<div class="formula-box">
+  <b>V<sub>battery</sub>(mV) = ADC<sub>raw</sub> &times; 5000 / 4095 &times; 2</b><br>
+  = ADC<sub>raw</sub> &times; 10000 / 4095
+</div>
+
+<p>분압비 0.5의 역수(&times;2)를 곱하여 원래 배터리 전압을 복원합니다.</p>
+
+<h3>소프트웨어 구현</h3>
+<pre>
+uint16 DrvAdc_GetBatteryMv(void)
+{
+    Ifx_VADC_RES result;
+    result = IfxVadc_Adc_getResult(&amp;s_adcChBattery);
+
+    if (result.B.VF)
+    {
+        /* V_battery_mV = raw * (5 * g_batMultiplier) / 4095
+         * g_batMultiplier = 2000 (x2.000)               */
+        return (uint16)((uint32)result.B.RESULT
+                        * (5u * g_batMultiplier) / 4095u);
+    }
+    return 0;
+}
+</pre>
+
+<div class="note-box">
+  <b>캘리브레이션 계수 (g_batMultiplier)</b>: 이론적 분압비는 정확히 2.0이지만, ADC 입력 임피던스와 저항 오차로 인해 실측값과 차이가 발생할 수 있습니다. 이 경우 멀티미터 실측값과 비교하여 보정 계수를 조정합니다. 예: 실측 8.0V인데 패널에 7.52V로 표시되면, 계수를 2000 &rarr; 2128로 조정합니다.
+</div>
+
+<h2>1.4 텔레메트리 전송</h2>
+<p>100ms 주기의 태스크에서 배터리 전압을 포함한 센서 데이터를 UART로 전송합니다:</p>
+<pre>
+L:1234,R:2345,U:30,B:7400\r\n
+                      ^^^^
+                      배터리 7400mV = 7.4V
+</pre>
+<p>패널(PC)에서는 이 텍스트를 파싱하여 실시간 전압 그래프와 숫자 표시를 합니다.</p>
+
+
+<!-- ============================================================ -->
+<h1 class="page-break">2. 모터 캘리브레이션 (DFLASH 저장)</h1>
+<!-- ============================================================ -->
+
+<h2>2.1 왜 모터별 캘리브레이션이 필요한가</h2>
+<p>4WD RC카의 4개 모터는 개체 차이(내부 저항, 마찰, 기어 편차)로 인해 동일한 Duty를 인가해도 실제 회전 속도가 다릅니다. 이로 인해 직진 시 한쪽으로 쏠리는 현상이 발생합니다.</p>
+<p>엔코더가 없는 오픈루프 시스템에서는 각 모터의 Duty를 개별적으로 보정하여 직진성을 확보해야 합니다.</p>
+
+<h2>2.2 캘리브레이션 데이터 구조</h2>
+<p>캘리브레이션 값은 TC237의 DFLASH(Data Flash, 0xAF000000)에 8바이트(1페이지) 단위로 저장됩니다.</p>
+
+<table>
+  <tr><th>바이트</th><th>필드</th><th>범위</th><th>기본값</th><th>설명</th></tr>
+  <tr><td>[0]</td><td>dutyFL</td><td>0~100%</td><td>70</td><td>전좌(Front-Left) 모터 Duty</td></tr>
+  <tr><td>[1]</td><td>dutyFR</td><td>0~100%</td><td>70</td><td>전우(Front-Right) 모터 Duty</td></tr>
+  <tr><td>[2]</td><td>dutyRL</td><td>0~100%</td><td>70</td><td>후좌(Rear-Left) 모터 Duty</td></tr>
+  <tr><td>[3]</td><td>dutyRR</td><td>0~100%</td><td>70</td><td>후우(Rear-Right) 모터 Duty</td></tr>
+  <tr><td>[4]</td><td>turnFront</td><td>0~100%</td><td>100</td><td>회전 시 전륜 속도 팩터</td></tr>
+  <tr><td>[5]</td><td>turnRear</td><td>0~100%</td><td>100</td><td>회전 시 후륜 속도 팩터</td></tr>
+  <tr><td>[6]</td><td>magicLo</td><td>0xFE</td><td>-</td><td rowspan="2">유효성 검증 매직넘버</td></tr>
+  <tr><td>[7]</td><td>magicHi</td><td>0xCA</td><td>-</td></tr>
+</table>
+
+<div class="note-box">
+  <b>매직넘버(0xCAFE)</b>: DFLASH가 비어있거나 데이터가 손상된 경우를 감지합니다. 부팅 시 매직넘버가 일치하지 않으면 기본값(70%)을 사용합니다.
+</div>
+
+<h2>2.3 DFLASH Write 시퀀스</h2>
+<p>TC237 DFLASH는 NOR Flash 방식으로, 쓰기 전에 반드시 섹터 단위 삭제(Erase)가 필요합니다. 한 번 0&rarr;1로 바꿀 수 없고, Erase로 전체를 1(0xFF)로 만든 후에만 Write가 가능합니다.</p>
+
+<pre>
+[Save 시퀀스]
+1. Endinit 해제         -- Flash 레지스터 보호 해제
+2. IfxFlash_clearStatus -- 이전 에러 플래그 클리어
+3. IfxFlash_eraseSector -- Sector 0 전체 삭제 (8KB)
+4. IfxFlash_waitUnbusy  -- 삭제 완료 대기
+5. IfxFlash_enterPageMode -- 쓰기 모드 진입
+6. IfxFlash_loadPage2X32  -- 8바이트 데이터 로드
+7. IfxFlash_writePage     -- 페이지 쓰기 실행
+8. IfxFlash_waitUnbusy    -- 쓰기 완료 대기
+9. Endinit 복원          -- Flash 레지스터 보호 복원
+10. 검증: 매직넘버 읽어서 성공 확인
+</pre>
+
+<div class="warn-box">
+  <b>주의</b>: Erase 후 검증을 반드시 수행해야 합니다. 간헐적으로 Erase가 실패하는 경우가 있어, 본 구현에서는 최대 3회 재시도 로직을 포함합니다. DFLASH의 Erase/Write 수명은 약 10만 회이므로 캘리브레이션 용도로는 충분합니다.
+</div>
+
+<h2>2.4 캘리브레이션 모델</h2>
+<p>각 모터의 실제 Duty는 다음 수식으로 결정됩니다:</p>
+
+<div class="formula-box">
+  <b>Duty<sub>actual</sub> = (Cal<sub>motor</sub> + BatComp) &times; Speed / 100</b>
+</div>
+
+<table>
+  <tr><th>변수</th><th>설명</th><th>범위</th></tr>
+  <tr><td>Cal<sub>motor</sub></td><td>각 모터별 캘리브레이션 Duty (DFLASH 저장)</td><td>0~100%</td></tr>
+  <tr><td>BatComp</td><td>배터리 전압 보상값 (런타임 자동 계산)</td><td>0~8</td></tr>
+  <tr><td>Speed</td><td>조종기에서 전송된 속도 명령</td><td>0~100%</td></tr>
+</table>
+
+<h3>예시</h3>
+<table>
+  <tr><th>파라미터</th><th>FL</th><th>FR</th><th>RL</th><th>RR</th></tr>
+  <tr><td>Cal (저장값)</td><td>70</td><td>70</td><td>75</td><td>75</td></tr>
+  <tr><td>BatComp (7.4V)</td><td>+4</td><td>+4</td><td>+4</td><td>+4</td></tr>
+  <tr><td>Speed (100%)</td><td colspan="4">100</td></tr>
+  <tr><td><b>실제 Duty</b></td><td><b>74%</b></td><td><b>74%</b></td><td><b>79%</b></td><td><b>79%</b></td></tr>
+</table>
+<p>후륜(RL/RR)이 전륜(FL/FR)보다 높은 Duty를 가지는 것은, 차량 무게 중심이 뒤쪽에 있어 후륜에 더 많은 토크가 필요하기 때문입니다.</p>
+
+<h2>2.5 실시간 캘리브레이션 절차</h2>
+<p>본 시스템의 특징은 <b>주행 중 실시간 조절</b>이 가능하다는 점입니다. 기존 방식처럼 "주행&rarr;측정&rarr;수정&rarr;재주행"을 반복할 필요 없이, 달리면서 바로 보정합니다.</p>
+
+<ol>
+  <li>PC 패널 연결 &rarr; <b>LIVE 모드 ON</b></li>
+  <li><b>W키</b>로 전진 주행 시작</li>
+  <li>차가 오른쪽으로 쏠리면 &rarr; FR/RR의 <b>&minus;</b> 버튼 클릭</li>
+  <li>차가 왼쪽으로 쏠리면 &rarr; FL/RL의 <b>&minus;</b> 버튼 클릭</li>
+  <li>값 변경 즉시 MCU에 반영 &mdash; 주행하면서 직진성 확인</li>
+  <li>직진 확인 후 <b>SAVE</b> &rarr; DFLASH에 영구 저장</li>
+  <li>재부팅해도 자동 복원 (부팅 시 LoadCalibration 호출)</li>
+</ol>
+
+<div class="note-box">
+  <b>MCU RAM 모니터링</b>: 패널 하단에 "MCU RAM" 행이 있어 MCU에 실제 적용된 캘리브레이션 값을 확인할 수 있습니다. SEND 후 자동으로 CAL_QUERY 명령을 보내 현재 값을 읽어옵니다.
+</div>
+
+
+<!-- ============================================================ -->
+<h1 class="page-break">3. 배터리 전압 보상 제어</h1>
+<!-- ============================================================ -->
+
+<h2>3.1 문제: 전압 하락에 따른 속도 감소</h2>
+<p>RC카를 5분쯤 신나게 주행하면, 어느 순간 "느려졌다"는 느낌이 듭니다. 같은 조종 명령을 줬는데 처음보다 속도가 명백히 줄어든 것입니다.</p>
+<p>이는 배터리 전압이 떨어졌기 때문입니다. DC 모터의 RPM은 인가된 평균 전압에 거의 비례합니다:</p>
+
+<div class="formula-box">
+  <b>RPM &prop; V<sub>avg</sub> = V<sub>battery</sub> &times; Duty / 100</b>
+</div>
+
+<p>배터리가 8.4V에서 6.4V로 떨어지면, 같은 Duty 70%에서:</p>
+<table>
+  <tr><th>배터리 전압</th><th>Duty</th><th>평균 전압</th><th>속도 비율</th></tr>
+  <tr><td>8.4V (만충)</td><td>70%</td><td>5.88V</td><td>100%</td></tr>
+  <tr><td>7.4V</td><td>70%</td><td>5.18V</td><td>88%</td></tr>
+  <tr><td>6.4V (방전)</td><td>70%</td><td>4.48V</td><td>76%</td></tr>
+</table>
+<p>약 <b>24%</b>의 속도 감소가 발생합니다.</p>
+
+<h2>3.2 해결: 전압 보상 (Voltage Compensation)</h2>
+<p>이상적인 해결 방법은 엔코더를 사용한 피드백 제어(PID)이지만, 본 시스템에서는 엔코더가 없습니다. 대신 배터리 전압을 ADC로 읽어, 전압이 떨어진 만큼 Duty를 올려주는 <b>전압 보상(Feedforward)</b> 방식을 사용합니다.</p>
+
+<div class="formula-box">
+  <b>BatComp = (V<sub>ref</sub> &minus; V<sub>current</sub>) / (V<sub>ref</sub> &minus; V<sub>min</sub>) &times; COMP<sub>max</sub></b><br><br>
+  V<sub>ref</sub> = 8400mV (만충), &nbsp; V<sub>min</sub> = 6400mV (최저), &nbsp; COMP<sub>max</sub> = 8
+</div>
+
+<h3>보상 테이블</h3>
+<table>
+  <tr><th>배터리 전압</th><th>보상값</th><th>Cal=70일 때 실제 Duty</th><th>평균 전압 (보상 후)</th></tr>
+  <tr><td>8.4V (만충)</td><td>+0</td><td>70%</td><td>5.88V</td></tr>
+  <tr><td>7.9V</td><td>+2</td><td>72%</td><td>5.69V</td></tr>
+  <tr><td>7.4V</td><td>+4</td><td>74%</td><td>5.48V</td></tr>
+  <tr><td>6.9V</td><td>+6</td><td>76%</td><td>5.24V</td></tr>
+  <tr><td>6.4V (최저)</td><td>+8</td><td>78%</td><td>4.99V</td></tr>
+</table>
+
+<p>완벽한 보상은 아니지만, 보상 없이 4.48V까지 떨어지는 것에 비해 4.99V를 유지하므로 <b>체감 속도 변화를 크게 줄일</b> 수 있습니다.</p>
+
+<h3>소프트웨어 구현</h3>
+<pre>
+#define BAT_VREF_MV   8400u   /* 만충 전압 기준 */
+#define BAT_VMIN_MV   6400u   /* 최저 전압 */
+#define BAT_COMP_MAX  8       /* 최대 보상 Duty */
+
+static sint16 getBatCompensation(void)
+{
+    uint16 batMv = DrvAdc_GetBatteryMv();
+
+    if (batMv == 0u || batMv >= BAT_VREF_MV)
+        return 0;              /* 만충 or 미측정 */
+
+    if (batMv <= BAT_VMIN_MV)
+        return BAT_COMP_MAX;   /* 최저 이하 → 최대 보상 */
+
+    /* 선형 보간 */
+    return (sint16)(((uint32)(BAT_VREF_MV - batMv) * BAT_COMP_MAX)
+                    / (BAT_VREF_MV - BAT_VMIN_MV));
+}
+</pre>
+
+<div class="note-box">
+  <b>피드백 vs 피드포워드</b>: 엔코더 기반 PID 제어(피드백)는 목표 속도를 정확히 추종하지만 센서가 필요합니다. 전압 보상(피드포워드)은 센서 없이 ADC만으로 구현 가능하며, 모터 부하 변화(경사, 노면)에는 대응하지 못하지만 배터리 방전에 의한 점진적 속도 저하는 효과적으로 보상합니다.
+</div>
+
+
+<!-- ============================================================ -->
+<h1 class="page-break">4. 저전압 경고 알람 (부저)</h1>
+<!-- ============================================================ -->
+
+<h2>4.1 설계 목적</h2>
+<p>리튬이온 배터리는 과방전 시 비가역적 손상이 발생합니다. 셀당 3.0V(2S 기준 6.0V) 이하로 떨어지면 배터리 수명이 영구적으로 단축됩니다. 이를 방지하기 위해, 전압이 임계값(6.8V) 이하로 떨어지면 부저를 울려 사용자에게 경고합니다.</p>
+
+<h2>4.2 하드웨어 구성</h2>
+<p>패시브 부저(Passive Buzzer)를 사용합니다. 패시브 부저는 외부에서 PWM 신호를 공급해야 소리가 나며, PWM 주파수를 변경하면 음높이(피치)가 바뀌므로 멜로디 재생이 가능합니다.</p>
+
+<table>
+  <tr><th>항목</th><th>사양</th></tr>
+  <tr><td>부저 종류</td><td>패시브 부저 (Arduino 호환)</td></tr>
+  <tr><td>MCU 출력</td><td>TOM0_Ch10 &rarr; TOUT2 &rarr; P02.2 (X103 핀 15)</td></tr>
+  <tr><td>PWM 주파수</td><td>262Hz ~ 880Hz (음계에 따라 가변)</td></tr>
+  <tr><td>PWM Duty</td><td>50% (ON) / 0% (OFF)</td></tr>
+</table>
+
+<h2>4.3 음계 제어 원리</h2>
+<p>패시브 부저의 음높이는 PWM 주파수로 결정됩니다. GTM TOM 타이머의 주기(Period)를 변경하면 주파수가 바뀝니다:</p>
+
+<div class="formula-box">
+  <b>Period = FXCLK1 / Frequency</b><br>
+  FXCLK1 = 6,250,000 Hz<br><br>
+  예: 440Hz(A4) &rarr; Period = 6,250,000 / 440 = 14,205 ticks
+</div>
+
+<pre>
+void DrvBuzzer_PlayNote(uint16 freqHz)
+{
+    Ifx_TimerValue newPeriod = 6250000u / freqHz;
+    Ifx_TimerValue trigger   = newPeriod / 2;  /* 50% duty */
+
+    IfxGtm_Tom_Timer_setPeriod(&amp;s_tomBuzzer, newPeriod);
+    IfxGtm_Tom_Timer_setTrigger(&amp;s_tomBuzzer, trigger);
+}
+</pre>
+
+<h2>4.4 멜로디 재생 구조</h2>
+<p>100ms 주기 태스크에서 배터리 전압을 확인하고, 임계값(6.8V) 미만이면 미리 정의된 멜로디 배열을 순서대로 재생합니다.</p>
+
+<pre>
+/* Super Mario Bros Theme — 주파수(Hz), 0=무음 */
+static const uint16 s_lowBatMelody[] = {
+    659, 659, 0, 659, 0, 523, 659, 0,   /* E5 E5 . E5 . C5 E5 . */
+    784, 0, 0, 0, 392, 0, 0, 0,         /* G5 . . . G4 . . .   */
+    523, 0, 0, 392, 0, 0, 330, 0,       /* C5 . . G4 . . E4 .   */
+    0, 440, 0, 494, 0, 466, 440, 0,     /* . A4 . B4 . Bb4 A4 . */
+    392, 659, 0, 784, 880, 0, 698, 784, /* G4 E5 . G5 A5 . F5 G5 */
+    0, 659, 0, 523, 587, 494, 0, 0,     /* . E5 . C5 D5 B4 . .   */
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,       /* 2초 쉼표              */
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+};
+</pre>
+
+<h3>재생 로직</h3>
+<pre>
+void AppTask_100ms(void)
+{
+    uint16 batMv = DrvAdc_GetBatteryMv();
+
+    if ((batMv > 0u) &amp;&amp; (batMv < 6800u))   /* 6.8V 미만 */
+    {
+        uint16 note = s_lowBatMelody[s_melodyIdx];
+        if (note > 0u)
+            DrvBuzzer_PlayNote(note);   /* 음 재생 */
+        else
+            DrvBuzzer_Off();            /* 무음 */
+
+        s_melodyIdx++;
+        if (s_melodyIdx >= MELODY_LEN)
+            s_melodyIdx = 0u;           /* 반복 재생 */
+    }
+    else
+    {
+        DrvBuzzer_Off();
+        s_melodyIdx = 0u;
+    }
+}
+</pre>
+
+<table>
+  <tr><th>음표</th><th>주파수</th><th>시간</th></tr>
+  <tr><td>E5</td><td>659Hz</td><td>200ms</td></tr>
+  <tr><td>C5</td><td>523Hz</td><td>100ms</td></tr>
+  <tr><td>G5</td><td>784Hz</td><td>100ms</td></tr>
+  <tr><td>G4</td><td>392Hz</td><td>100ms</td></tr>
+  <tr><td>A4</td><td>440Hz</td><td>100ms</td></tr>
+  <tr><td>쉼표</td><td>0 (OFF)</td><td>2000ms</td></tr>
+</table>
+
+<div class="note-box">
+  <b>왜 마리오 테마인가?</b> 단순한 "삐-삐-삐" 경고음 대신 인식하기 쉬운 멜로디를 사용하면 (1) 배터리 부족 상황을 즉시 인지할 수 있고, (2) 주변 소음과 구별이 용이합니다. 또한 패시브 부저의 가변 주파수 기능을 활용한 응용 사례로서 교육적 가치가 있습니다.
+</div>
+
+
+<!-- ============================================================ -->
+<h1 class="page-break">5. 시스템 전체 구조 요약</h1>
+<!-- ============================================================ -->
+
+<h2>5.1 소프트웨어 모듈 구성</h2>
+<table>
+  <tr><th>모듈</th><th>파일</th><th>기능</th></tr>
+  <tr><td>ADC 드라이버</td><td>DrvAdc.c/h</td><td>IR 센서(AN1, AN12) + 배터리 전압(AN0) 읽기</td></tr>
+  <tr><td>Flash 드라이버</td><td>DrvFlash.c/h</td><td>DFLASH 캘리브레이션 저장/로드/삭제</td></tr>
+  <tr><td>부저 드라이버</td><td>DrvBuzzer.c/h</td><td>패시브 부저 PWM 제어 (가변 주파수)</td></tr>
+  <tr><td>차량 제어</td><td>AppVehicle.c/h</td><td>캘리브레이션 + 전압보상 기반 모터 제어</td></tr>
+  <tr><td>프로토콜</td><td>AppProtocol.c/h</td><td>CAL 명령 처리 (SET/SAVE/LOAD/QUERY/ERASE)</td></tr>
+  <tr><td>태스크</td><td>AppTask.c/h</td><td>텔레메트리 전송 + 저전압 알람 로직</td></tr>
+  <tr><td>PC 패널</td><td>panel.py</td><td>실시간 모니터링 + LIVE 캘리브레이션 UI</td></tr>
+</table>
+
+<h2>5.2 데이터 흐름</h2>
+<pre>
+[배터리] ─── 분압(10k:10k) ──→ [ADC AN0] ──→ batMv (mV)
+                                                 │
+                        ┌────────────────────────┤
+                        │                        │
+                   [전압 보상]              [저전압 판단]
+                   BatComp=0~8             batMv < 6800?
+                        │                        │
+                        ▼                        ▼
+              Duty = Cal + Comp           [부저 멜로디 재생]
+                        │
+                        ▼
+                   [모터 구동]
+                        │
+                        ▼
+             [UART 텔레메트리] ──→ [PC 패널 표시]
+</pre>
+
+<h2>5.3 UART 캘리브레이션 명령 체계</h2>
+<table>
+  <tr><th>명령</th><th>코드</th><th>Payload</th><th>동작</th></tr>
+  <tr><td>CAL_BAT</td><td>0x20</td><td>hi + lo (2B)</td><td>배터리 보정 계수 설정</td></tr>
+  <tr><td>CAL_SAVE</td><td>0x21</td><td>없음</td><td>RAM &rarr; DFLASH 저장</td></tr>
+  <tr><td>CAL_LOAD</td><td>0x22</td><td>없음</td><td>DFLASH &rarr; RAM 복원</td></tr>
+  <tr><td>CAL_DUTY</td><td>0x23</td><td>FL+FR+RL+RR (4B)</td><td>모터 Duty 설정</td></tr>
+  <tr><td>CAL_TURN</td><td>0x24</td><td>Front+Rear (2B)</td><td>회전 팩터 설정</td></tr>
+  <tr><td>CAL_QUERY</td><td>0x25</td><td>없음</td><td>현재 값 조회 (텍스트 응답)</td></tr>
+  <tr><td>CAL_ERASE</td><td>0x26</td><td>없음</td><td>DFLASH 섹터 삭제</td></tr>
+</table>
+
+</body>
+</html>

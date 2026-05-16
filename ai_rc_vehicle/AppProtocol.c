@@ -97,7 +97,7 @@ static void dispatchPacket(const Parser *p, uint8 ch)
         {
             uint8 dir   = p->payload[0];
             uint8 speed = p->payload[1];
-            if (dir   > DIR_RIGHT) dir   = DIR_STOP;
+            if (dir   > DIR_TURN90_R) dir   = DIR_STOP;
             if (speed > 100u)      speed = 100u;
             g_vehicleCmd   = dir;
             g_vehicleSpeed = (float32)speed;

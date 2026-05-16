@@ -46,11 +46,13 @@
 #define CMD_NACK    0xE0u
 
 /* MOVE - direction (payload[0]) — matches VehicleCommand enum values */
-#define DIR_STOP    0u
-#define DIR_FORWARD 1u
-#define DIR_REVERSE 2u
-#define DIR_LEFT    3u
-#define DIR_RIGHT   4u
+#define DIR_STOP      0u
+#define DIR_FORWARD   1u
+#define DIR_REVERSE   2u
+#define DIR_LEFT      3u
+#define DIR_RIGHT     4u
+#define DIR_TURN90_L  5u
+#define DIR_TURN90_R  6u
 
 /* MODE - mode (payload[0]) */
 #define VEHICLE_MODE_MANUAL  0u
