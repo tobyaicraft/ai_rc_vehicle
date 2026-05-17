@@ -42,6 +42,7 @@
 #define CMD_CAL_TURN  0x24u
 #define CMD_CAL_QUERY 0x25u
 #define CMD_CAL_ERASE 0x26u
+#define CMD_RESET   0x30u
 #define CMD_ACK     0x80u
 #define CMD_NACK    0xE0u
 
@@ -53,11 +54,13 @@
 #define DIR_RIGHT     4u
 #define DIR_TURN90_L  5u
 #define DIR_TURN90_R  6u
+#define DIR_YAW_ZERO  7u
 
 /* MODE - mode (payload[0]) */
 #define VEHICLE_MODE_MANUAL  0u
 #define VEHICLE_MODE_CALIB   1u
 #define VEHICLE_MODE_AUTO    2u
+#define VEHICLE_MODE_TEST    3u
 
 /* NACK error codes */
 #define NACK_ERR_CHK    0x01u

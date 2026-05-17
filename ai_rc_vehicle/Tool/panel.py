@@ -66,6 +66,7 @@ CMD_CAL_DUTY = 0x23
 CMD_CAL_TURN  = 0x24
 CMD_CAL_QUERY = 0x25
 CMD_CAL_ERASE = 0x26
+CMD_RESET    = 0x30
 CMD_ACK      = 0x80
 CMD_NACK     = 0xE0
 
@@ -76,6 +77,7 @@ DIR_LEFT      = 3
 DIR_RIGHT     = 4
 DIR_TURN90_L  = 5
 DIR_TURN90_R  = 6
+DIR_YAW_ZERO  = 7
 
 PROTO_MAX_PKT_LEN = 9   # CMD(1) + PAYLOAD(8) max
 
@@ -354,7 +356,7 @@ class RcDashboard:
                  font=("Consolas", 8)).pack(side=tk.LEFT)
         self._mode_combo = ttk.Combobox(mode_row, width=11, state="readonly",
                                          font=("Consolas", 8))
-        self._mode_combo["values"] = ["MANUAL", "CALIBRATION", "AUTO"]
+        self._mode_combo["values"] = ["MANUAL", "CALIBRATION", "AUTO", "TEST"]
         self._mode_combo.current(0)
         self._mode_combo.pack(side=tk.LEFT, padx=4)
         self._mode_combo.bind("<<ComboboxSelected>>", self._on_mode_change)
@@ -366,11 +368,16 @@ class RcDashboard:
                                     font=("Consolas", 8, "bold"), cursor="hand2",
                                     command=self._send_ping)
         self._btn_ping.pack(side=tk.LEFT)
+        self._btn_reset = tk.Button(ping_row, text="RESET", width=6,
+                                     bg="#1a2040", fg=DANGER, relief=tk.FLAT,
+                                     font=("Consolas", 8, "bold"), cursor="hand2",
+                                     command=self._send_reset)
+        self._btn_reset.pack(side=tk.LEFT, padx=4)
         self._lbl_ack = tk.Label(ping_row, text="---", bg=CARD_BG, fg=FG_DIM,
                                    font=("Consolas", 10, "bold"))
         self._lbl_ack.pack(side=tk.LEFT, padx=6)
 
-        tk.Label(f, text="WASD / 1~0 / Space", bg=CARD_BG, fg=FG_DIM,
+        tk.Label(f, text="WASD / 1~0 / Space / Y", bg=CARD_BG, fg=FG_DIM,
                  font=("Consolas", 7)).pack(side=tk.BOTTOM, pady=4)
 
     # ── 3D Attitude View ─────────────────────────────────────────
@@ -968,6 +975,9 @@ class RcDashboard:
         self.root.bind('<KeyPress-E>', lambda e: self._send_turn90('L'))
         self.root.bind('<KeyPress-r>', lambda e: self._send_turn90('R'))
         self.root.bind('<KeyPress-R>', lambda e: self._send_turn90('R'))
+        # Yaw 리셋: Y키
+        self.root.bind('<KeyPress-y>', lambda e: self._send_yaw_reset())
+        self.root.bind('<KeyPress-Y>', lambda e: self._send_yaw_reset())
 
     def _key_press(self, d):
         if not self.connected or self.active_key == d:
@@ -1019,9 +1029,20 @@ class RcDashboard:
     def _send_ping(self):
         self._write_packet(build_packet(CMD_PING))
 
+    def _send_reset(self):
+        self._write_packet(build_packet(CMD_RESET))
+
+    def _send_yaw_reset(self):
+        self._write_packet(build_packet(CMD_MOVE, bytes([DIR_YAW_ZERO, self.speed * 10])))
+        self._lbl_cmd.configure(text="YAW→0°", fg=ACCENT2)
+
     def _on_mode_change(self, _event=None):
-        mode_idx = self._mode_combo.current()   # 0=MANUAL, 1=CALIB, 2=AUTO
+        mode_idx = self._mode_combo.current()   # 0=MANUAL, 1=CALIB, 2=AUTO, 3=TEST
         self._write_packet(build_packet(CMD_MODE, bytes([mode_idx])))
+        # TEST/AUTO 모드 진입 시 현재 속도를 MCU에 전달
+        if mode_idx >= 2:
+            self.root.after(50, lambda: self._write_packet(
+                build_packet(CMD_MOVE, bytes([DIR_STOP, self.speed * 10]))))
 
     def _write_packet(self, pkt):
         """Send packet via serial or BLE. Returns False on error."""
@@ -1057,6 +1078,9 @@ class RcDashboard:
         # If currently moving, immediately update speed
         if self.connected and self.active_key and self.active_key in DIR_MAP:
             self._write_packet(build_packet(CMD_MOVE, bytes([DIR_MAP[self.active_key], n * 10])))
+        # TEST 모드: 방향키 없이도 속도 전달
+        elif self.connected and self._mode_combo.get() == "TEST":
+            self._write_packet(build_packet(CMD_MOVE, bytes([DIR_STOP, n * 10])))
 
     # ════════════════════════════════════════════════════════════════
     # BLE mode

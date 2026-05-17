@@ -8,6 +8,8 @@
 #include "DrvUart1.h"
 #include "DrvGtmTimer.h"
 #include "DrvFlash.h"
+#include "IfxCpu.h"
+#include "IfxScuWdt.h"
 
 /******************************************************************************/
 /*                           Types                                            */
@@ -97,10 +99,15 @@ static void dispatchPacket(const Parser *p, uint8 ch)
         {
             uint8 dir   = p->payload[0];
             uint8 speed = p->payload[1];
-            if (dir   > DIR_TURN90_R) dir   = DIR_STOP;
+            if (dir   > DIR_YAW_ZERO) dir   = DIR_STOP;
             if (speed > 100u)      speed = 100u;
-            g_vehicleCmd   = dir;
             g_vehicleSpeed = (float32)speed;
+            /* TEST/AUTO 모드에서는 방향을 태스크가 제어하므로 dir 무시 */
+            if (g_vehicleMode == VEHICLE_MODE_MANUAL ||
+                g_vehicleMode == VEHICLE_MODE_CALIB)
+            {
+                g_vehicleCmd = dir;
+            }
             g_lastMoveTime = g_1ms_counter;
             sendAck(CMD_MOVE, ch);
         }
@@ -114,7 +121,7 @@ static void dispatchPacket(const Parser *p, uint8 ch)
         if (p->payloadLen == 1u)
         {
             uint8 mode = p->payload[0];
-            if (mode <= VEHICLE_MODE_AUTO)
+            if (mode <= VEHICLE_MODE_TEST)
                 g_vehicleMode = mode;
             sendAck(CMD_MODE, ch);
         }
@@ -290,6 +297,29 @@ static void dispatchPacket(const Parser *p, uint8 ch)
                 sendAck(CMD_CAL_ERASE, ch);
             else
                 sendNack(NACK_ERR_CMD, ch);
+        }
+        else
+        {
+            sendNack(NACK_ERR_LEN, ch);
+        }
+        break;
+
+    case CMD_RESET:
+        if (p->payloadLen == 0u)
+        {
+            sendAck(CMD_RESET, ch);
+            /* ACK 전송 완료 대기 후 소프트웨어 리셋 */
+            {
+                volatile uint32 wait;
+                for (wait = 0u; wait < 100000u; wait++) {}
+            }
+            /* Safety Endinit 해제 후 SW Reset 요청 */
+            {
+                uint16 pwd = IfxScuWdt_getSafetyWatchdogPassword();
+                IfxScuWdt_clearSafetyEndinit(pwd);
+                MODULE_SCU.SWRSTCON.B.SWRSTREQ = 1;
+                while (1) {}
+            }
         }
         else
         {

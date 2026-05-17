@@ -20,6 +20,9 @@
 #define TURN90_MARGIN   3.0f     /* 도달 판정 여유 (±3°) */
 #define TURN90_TIMEOUT  300u     /* 타임아웃 (×10ms = 3초) */
 
+#define YAW_ZERO_MARGIN  5.0f   /* 0도 복귀 판정 여유 (±5°) */
+#define YAW_ZERO_TIMEOUT 500u   /* 타임아웃 (×10ms = 5초) */
+
 /******************************************************************************/
 /*                           Global Variables                                 */
 /******************************************************************************/
@@ -33,6 +36,10 @@ static boolean s_turn90Active  = FALSE;
 static sint8   s_turn90Dir     = 0;      /* +1=우회전, -1=좌회전 */
 static float32 s_turn90StartYaw = 0.0f;
 static uint16  s_turn90Counter = 0u;
+
+static boolean s_yawZeroActive  = FALSE;
+static sint8   s_yawZeroDir     = 0;     /* +1=우회전, -1=좌회전 */
+static uint16  s_yawZeroCounter = 0u;
 
 /******************************************************************************/
 /*                           Static Functions                                 */
@@ -65,14 +72,15 @@ static float32 yawDelta(float32 current, float32 start)
 /******************************************************************************/
 void AppVehicle_Init(void)
 {
-    g_vehicleCmd   = VEHICLE_STOP;
-    g_vehicleSpeed = 100.0f;
-    s_turn90Active = FALSE;
+    g_vehicleCmd    = VEHICLE_STOP;
+    g_vehicleSpeed  = 100.0f;
+    s_turn90Active  = FALSE;
+    s_yawZeroActive = FALSE;
 }
 
 boolean AppVehicle_IsTurning(void)
 {
-    return s_turn90Active;
+    return s_turn90Active || s_yawZeroActive;
 }
 
 void AppVehicle_Update(void)
@@ -128,6 +136,45 @@ void AppVehicle_Update(void)
         return;
     }
 
+    /* ── Yaw 0도 복귀 상태 머신 ──────────────────────────── */
+    if (s_yawZeroActive)
+    {
+        float32 curYaw = DrvMpu9250_GetYaw();
+        float32 absYaw = (curYaw < 0.0f) ? -curYaw : curYaw;
+
+        s_yawZeroCounter++;
+
+        /* ±5° 이내 도달 또는 타임아웃 → 래치: 정지하고 종료 */
+        if ((absYaw <= YAW_ZERO_MARGIN) ||
+            (s_yawZeroCounter >= YAW_ZERO_TIMEOUT))
+        {
+            s_yawZeroActive = FALSE;
+            g_vehicleCmd    = VEHICLE_STOP;
+            DrvMotor_Coast(MOTOR_FL);
+            DrvMotor_Coast(MOTOR_FR);
+            DrvMotor_Coast(MOTOR_RL);
+            DrvMotor_Coast(MOTOR_RR);
+            return;
+        }
+
+        /* 회전 계속 */
+        if (s_yawZeroDir > 0)   /* 우회전 */
+        {
+            DrvMotor_SetDuty(MOTOR_FL,  turnFL);
+            DrvMotor_SetDuty(MOTOR_FR, -turnFR);
+            DrvMotor_SetDuty(MOTOR_RL,  turnRL);
+            DrvMotor_SetDuty(MOTOR_RR, -turnRR);
+        }
+        else                    /* 좌회전 */
+        {
+            DrvMotor_SetDuty(MOTOR_FL, -turnFL);
+            DrvMotor_SetDuty(MOTOR_FR,  turnFR);
+            DrvMotor_SetDuty(MOTOR_RL, -turnRL);
+            DrvMotor_SetDuty(MOTOR_RR,  turnRR);
+        }
+        return;
+    }
+
     /* ── 90도 회전 시작 트리거 ───────────────────────────── */
     if (g_vehicleCmd == VEHICLE_TURN90_R || g_vehicleCmd == VEHICLE_TURN90_L)
     {
@@ -135,6 +182,26 @@ void AppVehicle_Update(void)
         s_turn90Dir      = (g_vehicleCmd == VEHICLE_TURN90_R) ? 1 : -1;
         s_turn90StartYaw = DrvMpu9250_GetYaw();
         s_turn90Counter  = 0u;
+        return;
+    }
+
+    /* ── Yaw 0도 복귀 시작 트리거 ─────────────────────────── */
+    if (g_vehicleCmd == VEHICLE_YAW_ZERO)
+    {
+        float32 curYaw = DrvMpu9250_GetYaw();
+        float32 absYaw = (curYaw < 0.0f) ? -curYaw : curYaw;
+
+        /* 이미 ±5° 이내이면 동작 불필요 */
+        if (absYaw <= YAW_ZERO_MARGIN)
+        {
+            g_vehicleCmd = VEHICLE_STOP;
+            return;
+        }
+
+        s_yawZeroActive  = TRUE;
+        /* yaw > 0 (왼쪽 회전 상태) → 우회전(-), yaw < 0 → 좌회전(+) */
+        s_yawZeroDir     = (curYaw > 0.0f) ? 1 : -1;
+        s_yawZeroCounter = 0u;
         return;
     }
 

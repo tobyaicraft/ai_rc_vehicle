@@ -18,7 +18,8 @@ typedef enum
     VEHICLE_SPIN_LEFT  = 3,
     VEHICLE_SPIN_RIGHT = 4,
     VEHICLE_TURN90_L   = 5,
-    VEHICLE_TURN90_R   = 6
+    VEHICLE_TURN90_R   = 6,
+    VEHICLE_YAW_ZERO   = 7
 } VehicleCommand;
 
 extern volatile uint8   g_vehicleCmd;      /* VehicleCommand */

@@ -32,6 +32,7 @@
 /******************************************************************************/
 #define MOVE_TIMEOUT_MS     200u    /* MOVE 미수신 시 정지까지 시간 */
 #define BAT_LOW_THRESHOLD   6800u   /* 저전압 경고 임계값 (mV) */
+#define TEST_YAW_TRIGGER    15.0f   /* TEST 모드: Yaw 보정 트리거 임계값 (°) */
 
 /* 저전압 경고 멜로디 (주파수Hz, 0=무음)
  * 100ms 단위로 한 음씩 재생, 끝나면 반복
@@ -79,10 +80,28 @@ void AppTask_1ms(void)
 /******************************************************************************/
 void AppTask_10ms(void)
 {
-    /* MOVE 타임아웃: 200ms 동안 MOVE 명령 없으면 정지 */
-    if ((g_1ms_counter - g_lastMoveTime) > MOVE_TIMEOUT_MS)
+    /* ── TEST 모드: 직진 + Yaw ±15° 이탈 시 자동 보정 ── */
+    if (g_vehicleMode == VEHICLE_MODE_TEST)
     {
-        g_vehicleCmd = VEHICLE_STOP;
+        if (!AppVehicle_IsTurning())
+        {
+            float32 yaw    = DrvMpu9250_GetYaw();
+            float32 absYaw = (yaw < 0.0f) ? -yaw : yaw;
+
+            if (absYaw > TEST_YAW_TRIGGER)
+                g_vehicleCmd = VEHICLE_YAW_ZERO;   /* 보정 회전 */
+            else
+                g_vehicleCmd = VEHICLE_FORWARD;     /* 직진 유지 */
+        }
+    }
+    else if (g_vehicleMode == VEHICLE_MODE_MANUAL ||
+             g_vehicleMode == VEHICLE_MODE_CALIB)
+    {
+        /* MOVE 타임아웃: 200ms 동안 MOVE 명령 없으면 정지 (수동 모드만) */
+        if ((g_1ms_counter - g_lastMoveTime) > MOVE_TIMEOUT_MS)
+        {
+            g_vehicleCmd = VEHICLE_STOP;
+        }
     }
 
     AppVehicle_Update();
