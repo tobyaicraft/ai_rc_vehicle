@@ -11,7 +11,7 @@
 
 #include "Ifx_Types.h"
 
-#define SENSOR_FILTER_SIZE  5u
+#define SENSOR_FILTER_SIZE  3u
 
 typedef struct
 {

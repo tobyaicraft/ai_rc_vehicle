@@ -10,7 +10,7 @@
 
 #include "Ifx_Types.h"
 
-#define DANGER_DISTANCE_FRONT  20u   /* 전방 위험 거리 (cm) — 초음파 */
+#define DANGER_DISTANCE_FRONT  25u   /* 전방 위험 거리 (cm) — 초음파 */
 #define DANGER_DISTANCE_SIDE   15u   /* 측면 위험 거리 (cm) — IR 변환 */
 
 /* IR ADC → 대략적 거리 변환 임계값 (ADC raw)

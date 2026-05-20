@@ -83,6 +83,10 @@ void AppTask_10ms(void)
 {
     static uint8 s_prevMode = VEHICLE_MODE_MANUAL;
 
+    /* 초음파 센서 10ms 주기 측정 (빠른 장애물 감지) */
+    DrvUltrasonic_Trigger();
+    DrvSensorFusion_Update();
+
     /* 모드 전환 감지: AUTO 진입/이탈 시 상태 머신 초기화 */
     if (g_vehicleMode == VEHICLE_MODE_AUTO && s_prevMode != VEHICLE_MODE_AUTO)
         AppAutonomous_Start();
@@ -156,11 +160,6 @@ static void Uint16ToStr(uint16 val, char *buf)
 void AppTask_100ms(void)
 {
     DrvDio_ToggleLed0();
-
-    DrvUltrasonic_Trigger();
-
-    /* 센서 필터링 업데이트 (이동 평균 + 이상치 제거) */
-    DrvSensorFusion_Update();
 
     uint16 irLeft  = DrvSensorFusion_GetIrLeft();
     uint16 irRight = DrvSensorFusion_GetIrRight();

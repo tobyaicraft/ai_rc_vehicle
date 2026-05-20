@@ -21,10 +21,11 @@
 /*                           Configuration                                    */
 /******************************************************************************/
 #define BACKUP_TIME_MS    600u    /* 후진 지속 시간 (ms) */
-#define BYPASS_TIME_MS   1500u    /* 장애물 통과 직진 시간 (ms) */
+#define PAUSE_TIME_MS     100u    /* 후진→회전 정지 시간 (ms) */
+#define BYPASS_TIME_MS   1000u    /* 장애물 통과 직진 시간 (ms) */
 
 #define FORWARD_SPEED    60.0f    /* 직진 속도 (%) */
-#define BACKUP_SPEED     40.0f    /* 후진 속도 (%) */
+#define BACKUP_SPEED     60.0f    /* 후진 속도 (%) */
 #define TURN_SPEED      100.0f    /* 회전 속도 (%) */
 
 /******************************************************************************/
@@ -35,6 +36,7 @@ typedef enum
     AUTO_IDLE = 0,
     AUTO_FORWARD,          /* 직진 */
     AUTO_BACKWARD,         /* 후진 — 안전 거리 확보 */
+    AUTO_PAUSE,            /* 후진→회전 사이 정지 (모터 안정화) */
     AUTO_TURNING,          /* 90도 회전 */
     AUTO_BYPASS_FORWARD,   /* 직진 — 장애물 통과 */
     AUTO_YAW_RETURN        /* Yaw 0° 복귀 — 원래 방향 복원 */
@@ -95,6 +97,17 @@ void AppAutonomous_Update(void)
 
         if (elapsed >= BACKUP_TIME_MS)
         {
+            g_vehicleCmd = VEHICLE_STOP;
+            enterState(AUTO_PAUSE);
+        }
+        break;
+
+    /* ── 2a'. 정지 (모터 안정화 후 회전) ─────────────────────── */
+    case AUTO_PAUSE:
+        g_vehicleCmd = VEHICLE_STOP;
+
+        if (elapsed >= PAUSE_TIME_MS)
+        {
             /* IR raw: 작을수록 멀다 = 여유 있음 → 여유 있는 쪽으로 회전 */
             uint16 irLeft  = DrvSensorFusion_GetIrLeft();
             uint16 irRight = DrvSensorFusion_GetIrRight();
@@ -133,7 +146,8 @@ void AppAutonomous_Update(void)
         if (elapsed >= BYPASS_TIME_MS)
         {
             /* Yaw 0° 복귀 명령 발행 — AppVehicle이 실행 */
-            g_vehicleCmd = VEHICLE_YAW_ZERO;
+            g_vehicleSpeed = TURN_SPEED;
+            g_vehicleCmd   = VEHICLE_YAW_ZERO;
             enterState(AUTO_YAW_RETURN);
         }
         break;
