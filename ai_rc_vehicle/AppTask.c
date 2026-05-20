@@ -26,6 +26,7 @@
 #include "AppVehicle.h"
 #include "AppProtocol.h"
 #include "AppObstacle.h"
+#include "AppAutonomous.h"
 
 /******************************************************************************/
 /*                           Module Variables                                 */
@@ -80,6 +81,14 @@ void AppTask_1ms(void)
 /******************************************************************************/
 void AppTask_10ms(void)
 {
+    static uint8 s_prevMode = VEHICLE_MODE_MANUAL;
+
+    /* 모드 전환 감지: AUTO 진입/이탈 시 상태 머신 초기화 */
+    if (g_vehicleMode == VEHICLE_MODE_AUTO && s_prevMode != VEHICLE_MODE_AUTO)
+        AppAutonomous_Start();
+    else if (g_vehicleMode != VEHICLE_MODE_AUTO && s_prevMode == VEHICLE_MODE_AUTO)
+        AppAutonomous_Stop();
+
     /* ── TEST 모드: 직진 + Yaw ±15° 이탈 시 자동 보정 ── */
     if (g_vehicleMode == VEHICLE_MODE_TEST)
     {
@@ -94,6 +103,11 @@ void AppTask_10ms(void)
                 g_vehicleCmd = VEHICLE_FORWARD;     /* 직진 유지 */
         }
     }
+    /* ── AUTO 모드: Bug Algorithm 자율주행 ─────────────── */
+    else if (g_vehicleMode == VEHICLE_MODE_AUTO)
+    {
+        AppAutonomous_Update();
+    }
     else if (g_vehicleMode == VEHICLE_MODE_MANUAL ||
              g_vehicleMode == VEHICLE_MODE_CALIB)
     {
@@ -103,6 +117,8 @@ void AppTask_10ms(void)
             g_vehicleCmd = VEHICLE_STOP;
         }
     }
+
+    s_prevMode = g_vehicleMode;
 
     AppVehicle_Update();
 
